@@ -209,6 +209,10 @@ const updateGoogleSheet = asyncHandler(async (req, res) => {
     const sheets = google.sheets({ version: "v4", auth });
     const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
+    if (!spreadsheetId) {
+      throw new Error("GOOGLE_SHEET_ID environment variable is not set");
+    }
+
     // Generate unique_id if not provided (numbers only)
     const finalUniqueId = uniqueId || `${Date.now()}${Math.floor(Math.random() * 1000000)}`;
 
@@ -247,8 +251,10 @@ const updateGoogleSheet = asyncHandler(async (req, res) => {
   } catch (error) {
     console.error("Error updating Google Sheet:", error);
     let errorMessage = error.message;
-    if (error.message.includes("credentials")) {
+    if (error.message.includes("GOOGLE_CREDENTIALS")) {
       errorMessage = "Google API credentials issue. Please check GOOGLE_CREDENTIALS environment variable.";
+    } else if (error.message.includes("GOOGLE_SHEET_ID")) {
+      errorMessage = "Google Sheet ID missing. Please set GOOGLE_SHEET_ID environment variable.";
     } else if (error.message.includes("spreadsheet")) {
       errorMessage = "Cannot access Google Spreadsheet. Please check permissions and spreadsheet ID.";
     } else if (error.message.includes("quota")) {
