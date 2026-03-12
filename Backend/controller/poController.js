@@ -1,0 +1,295 @@
+const asyncHandler = require("express-async-handler");
+const { PrismaClient } = require("@prisma/client");
+const { google } = require("googleapis");
+
+const prisma = new PrismaClient();
+
+// ===== Duplicate detection helpers =====
+function toFixed2(num) {
+  const n = Number(num || 0);
+  return Number.isFinite(n) ? Number(n.toFixed(2)) : 0;
+}
+
+function normalizeLineItems(items) {
+  return (items || [])
+    .map((it) => ({
+      description: String(it.description || "").trim(),
+      quantity: toFixed2(it.quantity),
+      rate: toFixed2(it.rate),
+      gst: toFixed2(it.gst),
+      amount: toFixed2(
+        it.amount != null
+          ? it.amount
+          : toFixed2(it.quantity) * toFixed2(it.rate) * (1 + toFixed2(it.gst) / 100)
+      ),
+    }))
+    .sort((a, b) => a.description.localeCompare(b.description));
+}
+
+function payloadToComparable(payload) {
+  return {
+    company: {
+      name: String(payload.company?.name || "").trim(),
+      address: String(payload.company?.address || "").trim(),
+      cityStateZip: String(payload.company?.cityStateZip || "").trim(),
+      country: String(payload.company?.country || "").trim(),
+      contact: String(payload.company?.contact || "").trim(),
+    },
+    vendor: {
+      name: String(payload.vendor?.name || "").trim(),
+      address: String(payload.vendor?.address || "").trim(),
+      cityStateZip: String(payload.vendor?.cityStateZip || "").trim(),
+      country: String(payload.vendor?.country || "").trim(),
+    },
+    orderInfo: {
+      poNumber: String(payload.orderInfo?.poNumber || "").trim(),
+      orderDate: String(payload.orderInfo?.orderDate || "").trim(),
+      deliveryDate: String(payload.orderInfo?.deliveryDate || "").trim(),
+    },
+    lineItems: normalizeLineItems(payload.lineItems),
+    subTotal: toFixed2(payload.subTotal),
+    total: toFixed2(payload.total),
+  };
+}
+
+function dbOrderToComparable(po) {
+  return {
+    company: {
+      name: String(po.companyName || "").trim(),
+      address: String(po.companyAddress || "").trim(),
+      cityStateZip: String(po.companyCityStateZip || "").trim(),
+      country: String(po.companyCountry || "").trim(),
+      contact: String(po.companyContact || "").trim(),
+    },
+    vendor: {
+      name: String(po.vendorName || "").trim(),
+      address: String(po.vendorAddress || "").trim(),
+      cityStateZip: String(po.vendorCityStateZip || "").trim(),
+      country: String(po.vendorCountry || "").trim(),
+    },
+    orderInfo: {
+      poNumber: String(po.poNumber || "").trim(),
+      orderDate: po.orderDate ? new Date(po.orderDate).toISOString().split("T")[0] : "",
+      deliveryDate: po.deliveryDate ? new Date(po.deliveryDate).toISOString().split("T")[0] : "",
+    },
+    lineItems: normalizeLineItems(po.lineItems || []),
+    subTotal: toFixed2(po.subTotal),
+    total: toFixed2(po.total),
+  };
+}
+
+function deepEqual(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+const createPurchaseOrder = asyncHandler(async (req, res) => {
+  try {
+    const { company, vendor, orderInfo, lineItems, subTotal, taxRate, taxAmount, total } = req.body;
+
+    // Basic validation
+    if (!company || !company.name || !company.address || !company.cityStateZip || !company.country) {
+      return res.status(400).json({ success: false, message: "Company information is required: name, address, cityStateZip, country" });
+    }
+    
+    if (!vendor || !vendor.name || !vendor.address || !vendor.cityStateZip || !vendor.country) {
+      return res.status(400).json({ success: false, message: "Vendor information is required: name, address, cityStateZip, country" });
+    }
+    
+    if (!orderInfo || !orderInfo.poNumber) {
+      return res.status(400).json({ success: false, message: "PO number is required" });
+    }
+    
+    if (!lineItems || lineItems.length === 0) {
+      return res.status(400).json({ success: false, message: "At least one line item is required" });
+    }
+    
+    // Validate line items (allow rate 0, require qty > 0)
+    for (const [idx, item] of lineItems.entries()) {
+      if (!item.description || String(item.description).trim().length === 0) {
+        return res.status(400).json({ success: false, message: `Line item ${idx + 1}: description is required` });
+      }
+      const qty = Number(item.quantity);
+      const rate = Number(item.rate);
+      const gst = Number(item.gst || 0);
+      if (!Number.isFinite(qty) || qty <= 0) {
+        return res.status(400).json({ success: false, message: `Line item ${idx + 1}: quantity must be > 0` });
+      }
+      if (!Number.isFinite(rate) || rate < 0) {
+        return res.status(400).json({ success: false, message: `Line item ${idx + 1}: rate must be >= 0` });
+      }
+      if (!Number.isFinite(gst) || gst < 0) {
+        return res.status(400).json({ success: false, message: `Line item ${idx + 1}: gst must be >= 0` });
+      }
+    }
+
+    // Generate a unique reference ID for database management (numbers only)
+    const uniqueId = `${Date.now()}${Math.floor(Math.random() * 1000000)}`;
+
+    const normalizedOrderDate = orderInfo.orderDate ? new Date(orderInfo.orderDate) : null;
+    const normalizedDeliveryDate = orderInfo.deliveryDate ? new Date(orderInfo.deliveryDate) : null;
+
+    const purchaseOrder = await prisma.purchaseOrder.create({
+      data: {
+        uniqueId: uniqueId,
+        companyName: company.name,
+        companyAddress: company.address,
+        companyCityStateZip: company.cityStateZip,
+        companyCountry: company.country,
+        companyContact: company.contact || null,
+
+        vendorName: vendor.name,
+        vendorAddress: vendor.address,
+        vendorCityStateZip: vendor.cityStateZip,
+        vendorCountry: vendor.country,
+
+        poNumber: orderInfo.poNumber,
+        orderDate: normalizedOrderDate,
+        deliveryDate: normalizedDeliveryDate,
+
+        subTotal: subTotal,
+        taxRate: taxRate,
+        taxAmount: taxAmount,
+        total: total,
+
+        lineItems: {
+          create: lineItems.map((item) => {
+            const qty = Number(item.quantity) || 0;
+            const rate = Number(item.rate) || 0;
+            const gst = Number(item.gst) || 0;
+            const amount = item.amount != null ? item.amount : qty * rate * (1 + gst / 100);
+            return {
+              description: item.description,
+              quantity: qty,
+              rate: rate,
+              amount: amount,
+              gst: gst,
+            };
+          }),
+        },
+      },
+      include: {
+        lineItems: true,
+      },
+    });
+
+    res.status(201).json({ 
+      success: true, 
+      message: "Purchase order created successfully", 
+      data: purchaseOrder,
+      unique_id: uniqueId
+    });
+  } catch (error) {
+    console.error("Error saving purchase order:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+const updateGoogleSheet = asyncHandler(async (req, res) => {
+  try {
+    const { company, vendor, orderInfo, lineItems, subTotal, gst, total, uniqueId } = req.body;
+
+    if (!process.env.GOOGLE_CREDENTIALS) {
+      throw new Error("GOOGLE_CREDENTIALS environment variable is not set");
+    }
+
+    let credentials;
+    try {
+      credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+    } catch (parseError) {
+      throw new Error(`Invalid GOOGLE_CREDENTIALS JSON format: ${parseError.message}`);
+    }
+
+    const privateKey = credentials.private_key.replace(/\\n/g, "\n");
+    const auth = new google.auth.JWT({
+      email: credentials.client_email,
+      key: privateKey,
+      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    });
+
+    const sheets = google.sheets({ version: "v4", auth });
+    const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+
+    // Generate unique_id if not provided (numbers only)
+    const finalUniqueId = uniqueId || `${Date.now()}${Math.floor(Math.random() * 1000000)}`;
+
+    const rows = lineItems.map((item) => [
+      company.name,                    // A: Company Name
+      company.address,                 // B: Company Address
+      company.cityStateZip,            // C: Company City State Zip
+      company.country,                 // D: Company Country
+      vendor.name,                     // E: Vendor Name
+      vendor.address,                  // F: Vendor Address
+      vendor.cityStateZip,             // G: Vendor City State Zip
+      vendor.country,                  // H: Vendor Country
+      orderInfo.poNumber,              // I: PO Number
+      orderInfo.orderDate,             // J: Order Date
+      orderInfo.deliveryDate,          // K: Delivery Date
+      total,                            // L: Total
+      item.description,                // M: Item Description
+      item.quantity,                   // N: Quantity
+      item.rate,                       // O: Rate
+      item.amount,                     // P: Amount
+      item.gst,                        // Q: GST
+      finalUniqueId,                   // R: Unique ID
+    ]);
+
+    // Add an empty row after the data for better spacing
+    rows.push(Array(18).fill('')); // Empty row with same number of columns
+
+    const response = await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: "Sheet1!A:R",
+      valueInputOption: "USER_ENTERED",
+      resource: { values: rows },
+    });
+
+    res.status(200).json({ success: true, message: "Google Sheet updated successfully", updatedRows: response.data.updates?.updatedRows || rows.length });
+  } catch (error) {
+    console.error("Error updating Google Sheet:", error);
+    let errorMessage = error.message;
+    if (error.message.includes("credentials")) {
+      errorMessage = "Google API credentials issue. Please check GOOGLE_CREDENTIALS environment variable.";
+    } else if (error.message.includes("spreadsheet")) {
+      errorMessage = "Cannot access Google Spreadsheet. Please check permissions and spreadsheet ID.";
+    } else if (error.message.includes("quota")) {
+      errorMessage = "Google Sheets API quota exceeded. Please try again later.";
+    }
+    res.status(500).json({ success: false, message: errorMessage, error: process.env.NODE_ENV === "development" ? error.message : undefined });
+  }
+});
+
+const checkDuplicatePurchaseOrder = asyncHandler(async (req, res) => {
+  try {
+    const payload = req.body;
+    const comparable = payloadToComparable(payload);
+
+    const candidates = await prisma.purchaseOrder.findMany({
+      where: {
+        poNumber: payload?.orderInfo?.poNumber || "",
+        companyName: payload?.company?.name || "",
+        vendorName: payload?.vendor?.name || "",
+      },
+      include: {
+        lineItems: {
+          orderBy: {
+            id: 'asc',
+          },
+        },
+      },
+    });
+
+    for (const po of candidates) {
+      const compDb = dbOrderToComparable(po);
+      if (deepEqual(comparable, compDb)) {
+        return res.json({ exists: true, unique_id: po.uniqueId });
+      }
+    }
+
+    return res.json({ exists: false });
+  } catch (error) {
+    console.error("Error checking duplicate PO:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+module.exports = { createPurchaseOrder, updateGoogleSheet, checkDuplicatePurchaseOrder };

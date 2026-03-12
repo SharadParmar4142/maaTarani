@@ -1,0 +1,83 @@
+# Dependencies
+/node_modules
+**/node_modules/
+/.pnp
+.pnp.js
+.yarn/install-state.gz
+
+# Next.js
+/.next/
+**/.next/
+# /out/  # Comment this out or remove it
+
+# Production builds
+/build
+/dist
+**/build/
+**/dist/
+
+# Environment variables
+.env*.local
+.env
+.env.production
+
+# Debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage/
+*.lcov
+
+# nyc test coverage
+.nyc_output
+
+# TypeScript cache
+*.tsbuildinfo
+next-env.d.ts
+
+# Package manager lock files (keep one, remove others)
+# pnpm-lock.yaml
+yarn.lock
+
+# Vercel deployment
+.vercel
+
+# Turbo
+.turbo
+
+# Local development
+.cache/
+.temp/
+temp/
+
+# Miscellaneous
+*.tgz
+*.tar.gz
+.cache

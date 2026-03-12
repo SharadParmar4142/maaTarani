@@ -1,0 +1,81 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  name        String
+  phone       String    @unique
+  email       String    @unique
+  password    String
+  company     Company?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@map("users")
+}
+
+model Company {
+  id                    String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId                String    @unique @db.ObjectId
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companyName           String
+  companySize           String
+  yearOfEstablishment   Int
+  gstNumber             String    @unique
+  panNumber             String?   @unique
+  companyPhone          String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@map("companies")
+}
+
+model PurchaseOrder {
+  id                    String      @id @default(auto()) @map("_id") @db.ObjectId
+  uniqueId              String      @unique
+  companyName           String
+  companyAddress        String
+  companyCityStateZip   String
+  companyCountry        String
+  companyContact        String?
+  vendorName            String
+  vendorAddress         String
+  vendorCityStateZip    String
+  vendorCountry         String
+  poNumber              String
+  orderDate             DateTime?
+  deliveryDate          DateTime?
+  subTotal              Float
+  taxRate               Float?
+  taxAmount             Float?
+  total                 Float
+  lineItems             LineItem[]
+  createdAt             DateTime    @default(now())
+  updatedAt             DateTime    @updatedAt
+
+  @@map("purchase_orders")
+}
+
+model LineItem {
+  id                String          @id @default(auto()) @map("_id") @db.ObjectId
+  purchaseOrderId   String          @db.ObjectId
+  purchaseOrder     PurchaseOrder   @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  description       String
+  quantity          Int
+  rate              Float
+  amount            Float
+  gst               Float?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@map("line_items")
+}
