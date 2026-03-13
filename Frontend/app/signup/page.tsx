@@ -47,11 +47,16 @@ export default function SignupPage() {
   });
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+    const { name, value } = e.target;
+    const normalizedValue =
+      name === "gstNumber" || name === "panNumber"
+        ? value.toUpperCase().replace(/\s+/g, "")
+        : value;
+
     setFormData({
       ...formData,
-      [e.target.name]: e.target.value,
+      [name]: normalizedValue,
     });
-    setError("");
   };
 
   const validateStep1 = () => {

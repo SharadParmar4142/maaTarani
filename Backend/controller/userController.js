@@ -2,7 +2,7 @@ const express = require("express");
 const asyncHandler = require("express-async-handler");
 const { prisma } = require("../config/dbConfig");
 const jwt = require("jsonwebtoken");
-const bcrypt = require("bcrypt");
+const bcrypt = require("bcryptjs");
 const dotenv = require("dotenv").config();
 
 //@desc Register a User with Company Details
@@ -98,7 +98,7 @@ const registerUser = asyncHandler(async (req, res) => {
 
     // Check if PAN number already exists (if provided)
     if (panNumber) {
-        const panExists = await prisma.company.findUnique({
+        const panExists = await prisma.company.findFirst({
             where: { panNumber }
         });
 
