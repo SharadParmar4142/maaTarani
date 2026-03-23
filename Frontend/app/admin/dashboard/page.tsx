@@ -153,7 +153,7 @@ export default function AdminDashboardPage() {
 
     const intervalId = setInterval(() => {
       loadData();
-    }, 5000);
+    }, 60000);
 
     return () => clearInterval(intervalId);
   }, [token, isAdmin]);
