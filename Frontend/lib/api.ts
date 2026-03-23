@@ -1,6 +1,42 @@
 // API Configuration
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
 
+export interface AuthUser {
+  id: string;
+  name: string;
+  email: string;
+  phone: string;
+  role: 'USER' | 'ADMIN';
+}
+
+export interface Company {
+  id: string;
+  companyName: string;
+  companySize: string;
+  yearOfEstablishment: number;
+  gstNumber: string;
+  panNumber?: string | null;
+  companyPhone?: string | null;
+}
+
+export interface AuthResponse {
+  success: boolean;
+  message: string;
+  user: AuthUser;
+  company: Company | null;
+  accessToken: string;
+}
+
+export type POStatus =
+  | 'PENDING'
+  | 'ACCEPTED'
+  | 'PICKING'
+  | 'PACKING'
+  | 'SORTING'
+  | 'SHIPPING'
+  | 'FINAL_DELIVERY'
+  | 'REJECTED';
+
 // API Helper Function
 async function apiCall(endpoint: string, options: RequestInit = {}) {
   const url = `${API_BASE_URL}${endpoint}`;
@@ -40,14 +76,27 @@ export const authAPI = {
     gstNumber: string;
     panNumber?: string;
     companyPhone?: string;
-  }) => {
+  }): Promise<AuthResponse> => {
     return apiCall('/api/user/register', {
       method: 'POST',
       body: JSON.stringify(userData),
     });
   },
 
-  login: async (credentials: { email: string; password: string }) => {
+  registerAdmin: async (userData: {
+    name: string;
+    phone: string;
+    email: string;
+    password: string;
+    adminSignupKey?: string;
+  }): Promise<AuthResponse> => {
+    return apiCall('/api/user/admin/register', {
+      method: 'POST',
+      body: JSON.stringify(userData),
+    });
+  },
+
+  login: async (credentials: { email: string; password: string }): Promise<AuthResponse> => {
     return apiCall('/api/user/login', {
       method: 'POST',
       body: JSON.stringify(credentials),
@@ -60,6 +109,76 @@ export const authAPI = {
       headers: {
         Authorization: `Bearer ${token}`,
       },
+    });
+  },
+
+  updateProfile: async (token: string, profileData: Record<string, unknown>) => {
+    return apiCall('/api/user/profile', {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(profileData),
+    });
+  },
+};
+
+export const purchaseOrderAPI = {
+  checkDuplicate: async (token: string, payload: Record<string, unknown>) => {
+    return apiCall('/api/purchaseorder/checkDuplicate', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+  },
+
+  create: async (token: string, payload: Record<string, unknown>) => {
+    return apiCall('/api/purchaseorder', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+  },
+
+  updateGoogleSheet: async (token: string, payload: Record<string, unknown>) => {
+    return apiCall('/api/purchaseorder/updateGoogleSheet', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+  },
+
+  getMyOrders: async (token: string) => {
+    return apiCall('/api/purchaseorder/my', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+  },
+
+  getAdminDashboard: async (token: string) => {
+    return apiCall('/api/purchaseorder/admin/dashboard', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+  },
+
+  updateStatus: async (token: string, orderId: string, status: POStatus, reviewNote = '') => {
+    return apiCall(`/api/purchaseorder/${orderId}/status`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ status, reviewNote }),
     });
   },
 };

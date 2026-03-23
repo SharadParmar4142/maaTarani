@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
@@ -9,7 +9,7 @@ import { Mail, Lock, Eye, EyeOff, LogIn } from "lucide-react";
 
 export default function LoginPage() {
   const router = useRouter();
-  const { login } = useAuth();
+  const { login, user } = useAuth();
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
@@ -34,13 +34,20 @@ export default function LoginPage() {
 
     try {
       await login(formData.email, formData.password);
-      router.push("/purchase-order"); // Redirect to purchase order page after successful login
     } catch (err: any) {
       setError(err.message || "Invalid email or password");
     } finally {
       setIsLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (user?.role === "ADMIN") {
+      router.push("/admin/dashboard");
+    } else if (user?.role === "USER") {
+      router.push("/dashboard");
+    }
+  }, [user, router]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 flex items-center justify-center px-4 py-12">
@@ -142,6 +149,12 @@ export default function LoginPage() {
               Don't have an account?{" "}
               <Link href="/signup" className="text-[#c41e3a] hover:text-[#a01830] font-semibold">
                 Sign Up
+              </Link>
+            </p>
+            <p className="mt-2 text-gray-600">
+              Need admin access?{" "}
+              <Link href="/admin/signup" className="text-[#c41e3a] hover:text-[#a01830] font-semibold">
+                Admin Sign Up
               </Link>
             </p>
           </div>

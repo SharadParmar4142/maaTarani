@@ -1,24 +1,9 @@
 "use client";
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { authAPI } from '@/lib/api';
+import { authAPI, AuthUser, Company } from '@/lib/api';
 
-interface User {
-  id: string;
-  name: string;
-  email: string;
-  phone: string;
-}
-
-interface Company {
-  id: string;
-  companyName: string;
-  companySize: string;
-  yearOfEstablishment: number;
-  gstNumber: string;
-  panNumber?: string;
-  companyPhone?: string;
-}
+type User = AuthUser;
 
 interface AuthContextType {
   user: User | null;
@@ -26,9 +11,12 @@ interface AuthContextType {
   token: string | null;
   login: (email: string, password: string) => Promise<void>;
   register: (userData: any) => Promise<void>;
+  registerAdmin: (userData: any) => Promise<void>;
+  updateProfile: (profileData: any) => Promise<void>;
   logout: () => void;
   isLoading: boolean;
   isAuthenticated: boolean;
+  isAdmin: boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -93,6 +81,43 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const registerAdmin = async (userData: any) => {
+    try {
+      const response = await authAPI.registerAdmin(userData);
+
+      setUser(response.user);
+      setCompany(response.company);
+      setToken(response.accessToken);
+
+      localStorage.setItem('token', response.accessToken);
+      localStorage.setItem('user', JSON.stringify(response.user));
+      if (response.company) {
+        localStorage.setItem('company', JSON.stringify(response.company));
+      } else {
+        localStorage.removeItem('company');
+      }
+    } catch (error) {
+      throw error;
+    }
+  };
+
+  const updateProfile = async (profileData: any) => {
+    if (!token) {
+      throw new Error('You must be logged in to update profile');
+    }
+
+    const response = await authAPI.updateProfile(token, profileData);
+    setUser(response.user);
+    setCompany(response.company);
+
+    localStorage.setItem('user', JSON.stringify(response.user));
+    if (response.company) {
+      localStorage.setItem('company', JSON.stringify(response.company));
+    } else {
+      localStorage.removeItem('company');
+    }
+  };
+
   const logout = () => {
     setUser(null);
     setCompany(null);
@@ -110,9 +135,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         token,
         login,
         register,
+        registerAdmin,
+        updateProfile,
         logout,
         isLoading,
         isAuthenticated: !!user,
+        isAdmin: user?.role === 'ADMIN',
       }}
     >
       {children}

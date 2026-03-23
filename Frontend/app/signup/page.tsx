@@ -122,7 +122,7 @@ export default function SignupPage() {
         panNumber: formData.panNumber || undefined,
         companyPhone: formData.companyPhone || undefined,
       });
-      router.push("/"); // Redirect to home page after successful registration
+      router.push("/dashboard");
     } catch (err: any) {
       setError(err.message || "Registration failed. Please try again.");
     } finally {

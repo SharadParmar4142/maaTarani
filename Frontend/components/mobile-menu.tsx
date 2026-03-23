@@ -10,6 +10,7 @@ import { LogIn, UserPlus, LogOut, User, FileText } from "lucide-react";
 export function MobileMenu() {
   const [isOpen, setIsOpen] = useState(false);
   const { isAuthenticated, user, logout } = useAuth();
+  const isAdmin = user?.role === "ADMIN";
 
   const handleLogout = () => {
     logout();
@@ -90,13 +91,23 @@ export function MobileMenu() {
                 {isAuthenticated ? (
                   <>
                     <Link
-                      href="/purchase-order"
+                      href={isAdmin ? "/admin/dashboard" : "/dashboard"}
                       onClick={() => setIsOpen(false)}
                       className="flex items-center justify-center gap-2 w-full px-4 py-3 text-sm font-semibold text-white bg-[#c41e3a] hover:bg-[#a01830] rounded-lg transition-all shadow-sm"
                     >
                       <FileText className="w-4 h-4" />
-                      Purchase Order
+                      {isAdmin ? "Admin Dashboard" : "Dashboard"}
                     </Link>
+                    {!isAdmin && (
+                      <Link
+                        href="/purchase-order"
+                        onClick={() => setIsOpen(false)}
+                        className="flex items-center justify-center gap-2 w-full px-4 py-3 text-sm font-semibold text-gray-700 bg-white border border-gray-300 hover:bg-gray-50 rounded-lg transition-all"
+                      >
+                        <FileText className="w-4 h-4" />
+                        Create PO
+                      </Link>
+                    )}
                     <button
                       onClick={handleLogout}
                       className="flex items-center justify-center gap-2 w-full px-4 py-3 text-sm font-semibold text-white bg-gray-700 hover:bg-gray-800 rounded-lg transition-all"
@@ -122,6 +133,13 @@ export function MobileMenu() {
                     >
                       <UserPlus className="w-4 h-4" />
                       Sign Up
+                    </Link>
+                    <Link
+                      href="/admin/signup"
+                      onClick={() => setIsOpen(false)}
+                      className="flex items-center justify-center gap-2 w-full px-4 py-3 text-sm font-semibold text-gray-700 bg-white border border-gray-300 hover:bg-gray-50 rounded-lg transition-all"
+                    >
+                      Admin Sign Up
                     </Link>
                   </>
                 )}

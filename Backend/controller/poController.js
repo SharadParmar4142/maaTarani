@@ -1,8 +1,12 @@
 const asyncHandler = require("express-async-handler");
-const { PrismaClient } = require("@prisma/client");
+const { prisma } = require("../config/dbConfig");
 const { google } = require("googleapis");
-
-const prisma = new PrismaClient();
+const {
+  PO_STATUSES,
+  IN_PROGRESS_STATUSES,
+  getAllowedNextStatuses,
+  canTransitionStatus,
+} = require("../utils/poStatusTransitions");
 
 // ===== Duplicate detection helpers =====
 function toFixed2(num) {
@@ -84,6 +88,10 @@ function deepEqual(a, b) {
 
 const createPurchaseOrder = asyncHandler(async (req, res) => {
   try {
+    if (!req.user?.id) {
+      return res.status(401).json({ success: false, message: "User is not authorized" });
+    }
+
     const { company, vendor, orderInfo, lineItems, subTotal, taxRate, taxAmount, total } = req.body;
 
     // Basic validation
@@ -131,6 +139,8 @@ const createPurchaseOrder = asyncHandler(async (req, res) => {
     const purchaseOrder = await prisma.purchaseOrder.create({
       data: {
         uniqueId: uniqueId,
+        userId: req.user.id,
+        status: PO_STATUSES.PENDING,
         companyName: company.name,
         companyAddress: company.address,
         companyCityStateZip: company.cityStateZip,
@@ -169,6 +179,13 @@ const createPurchaseOrder = asyncHandler(async (req, res) => {
       },
       include: {
         lineItems: true,
+        user: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+          },
+        },
       },
     });
 
@@ -266,11 +283,16 @@ const updateGoogleSheet = asyncHandler(async (req, res) => {
 
 const checkDuplicatePurchaseOrder = asyncHandler(async (req, res) => {
   try {
+    if (!req.user?.id) {
+      return res.status(401).json({ success: false, message: "User is not authorized" });
+    }
+
     const payload = req.body;
     const comparable = payloadToComparable(payload);
 
     const candidates = await prisma.purchaseOrder.findMany({
       where: {
+        userId: req.user.id,
         poNumber: payload?.orderInfo?.poNumber || "",
         companyName: payload?.company?.name || "",
         vendorName: payload?.vendor?.name || "",
@@ -298,4 +320,159 @@ const checkDuplicatePurchaseOrder = asyncHandler(async (req, res) => {
   }
 });
 
-module.exports = { createPurchaseOrder, updateGoogleSheet, checkDuplicatePurchaseOrder };
+const getMyPurchaseOrders = asyncHandler(async (req, res) => {
+  const orders = await prisma.purchaseOrder.findMany({
+    where: { userId: req.user.id },
+    include: {
+      lineItems: true,
+      reviewedBy: {
+        select: {
+          id: true,
+          name: true,
+          email: true,
+        },
+      },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  res.status(200).json({
+    success: true,
+    counts: {
+      pending: orders.filter((order) => order.status === PO_STATUSES.PENDING).length,
+      accepted: orders.filter((order) => order.status === PO_STATUSES.ACCEPTED).length,
+      inProgress: orders.filter((order) => IN_PROGRESS_STATUSES.includes(order.status)).length,
+      delivered: orders.filter((order) => order.status === PO_STATUSES.FINAL_DELIVERY).length,
+      rejected: orders.filter((order) => order.status === PO_STATUSES.REJECTED).length,
+      total: orders.length,
+    },
+    data: orders,
+  });
+});
+
+const getAdminDashboardOrders = asyncHandler(async (req, res) => {
+  const orders = await prisma.purchaseOrder.findMany({
+    include: {
+      lineItems: {
+        orderBy: {
+          id: "asc",
+        },
+      },
+      user: {
+        select: {
+          name: true,
+          email: true,
+        },
+      },
+      reviewedBy: {
+        select: {
+          id: true,
+          name: true,
+          email: true,
+        },
+      },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  const pending = orders.filter((order) => order.status === PO_STATUSES.PENDING);
+  const accepted = orders.filter((order) => order.status === PO_STATUSES.ACCEPTED);
+  const inProgress = orders.filter((order) => IN_PROGRESS_STATUSES.includes(order.status));
+  const delivered = orders.filter((order) => order.status === PO_STATUSES.FINAL_DELIVERY);
+  const rejected = orders.filter((order) => order.status === PO_STATUSES.REJECTED);
+
+  res.status(200).json({
+    success: true,
+    counts: {
+      pending: pending.length,
+      accepted: accepted.length,
+      inProgress: inProgress.length,
+      delivered: delivered.length,
+      rejected: rejected.length,
+      total: orders.length,
+    },
+    data: {
+      pending,
+      accepted,
+      inProgress,
+      delivered,
+      rejected,
+    },
+  });
+});
+
+const updatePurchaseOrderStatus = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { status, reviewNote } = req.body;
+
+  if (!Object.values(PO_STATUSES).includes(status)) {
+    res.status(400);
+    throw new Error("Invalid status. Allowed: PENDING, ACCEPTED, PICKING, PACKING, SORTING, SHIPPING, FINAL_DELIVERY, REJECTED");
+  }
+
+  const existingOrder = await prisma.purchaseOrder.findUnique({ where: { id } });
+  if (!existingOrder) {
+    res.status(404);
+    throw new Error("Purchase order not found");
+  }
+
+  const allowedNextStatuses = getAllowedNextStatuses(existingOrder.status);
+  const isSameStatus = existingOrder.status === status;
+  const isAllowedTransition = canTransitionStatus(existingOrder.status, status);
+
+  if (!isSameStatus && !isAllowedTransition) {
+    res.status(400);
+    throw new Error(
+      `Invalid status transition from ${existingOrder.status} to ${status}. Allowed next: ${
+        allowedNextStatuses.length > 0 ? allowedNextStatuses.join(", ") : "none"
+      }`
+    );
+  }
+
+  const nextReviewNote =
+    typeof reviewNote === "string"
+      ? reviewNote.trim() || null
+      : existingOrder.reviewNote || null;
+
+  const updated = await prisma.purchaseOrder.update({
+    where: { id },
+    data: {
+      status,
+      reviewNote: nextReviewNote,
+      reviewedAt: status === PO_STATUSES.PENDING ? null : new Date(),
+      reviewedById: status === PO_STATUSES.PENDING ? null : req.user.id,
+    },
+    include: {
+      lineItems: true,
+      user: {
+        select: {
+          id: true,
+          name: true,
+          email: true,
+        },
+      },
+      reviewedBy: {
+        select: {
+          id: true,
+          name: true,
+          email: true,
+        },
+      },
+    },
+  });
+
+  res.status(200).json({
+    success: true,
+    message: "Purchase order status updated",
+    data: updated,
+  });
+});
+
+module.exports = {
+  createPurchaseOrder,
+  updateGoogleSheet,
+  checkDuplicatePurchaseOrder,
+  getMyPurchaseOrders,
+  getAdminDashboardOrders,
+  updatePurchaseOrderStatus,
+};

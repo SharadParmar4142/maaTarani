@@ -4,6 +4,7 @@ import { useState, useCallback, useEffect } from "react";
 import { Plus, X, Calendar, ArrowLeft } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
+import { purchaseOrderAPI } from "@/lib/api";
 import "./purchase.css";
 
 // @ts-ignore - jsPDF types may not be fully compatible
@@ -69,7 +70,7 @@ interface Modal {
 
 export default function PurchaseOrderPage() {
   const router = useRouter();
-  const { isAuthenticated, isLoading } = useAuth();
+  const { isAuthenticated, isLoading, token, company, user } = useAuth();
   const today = new Date().toISOString().split("T")[0];
 
   // Protect the route - redirect to login if not authenticated
@@ -77,7 +78,11 @@ export default function PurchaseOrderPage() {
     if (!isLoading && !isAuthenticated) {
       router.push("/login");
     }
-  }, [isAuthenticated, isLoading, router]);
+
+    if (!isLoading && user?.role === "ADMIN") {
+      router.push("/admin/dashboard");
+    }
+  }, [isAuthenticated, isLoading, user, router]);
 
   // Show loading state while checking authentication
   if (isLoading) {
@@ -92,17 +97,17 @@ export default function PurchaseOrderPage() {
   }
 
   // Don't render the page if not authenticated
-  if (!isAuthenticated) {
+  if (!isAuthenticated || user?.role === "ADMIN") {
     return null;
   }
   
   const [formData, setFormData] = useState<FormData>({
     company: {
-      name: "",
+      name: company?.companyName || "",
       address: "",
       cityStateZip: "",
       country: "India",
-      contact: "",
+      contact: company?.companyPhone || "",
     },
     vendor: {
       name: "",
@@ -138,6 +143,21 @@ export default function PurchaseOrderPage() {
   const [rateDisplayValues, setRateDisplayValues] = useState<{ [key: string]: string }>({});
   const [gstDisplayValues, setGstDisplayValues] = useState<{ [key: string]: string }>({});
   const [quantityDisplayValues, setQuantityDisplayValues] = useState<{ [key: string]: string }>({});
+
+  useEffect(() => {
+    if (!company) {
+      return;
+    }
+
+    setFormData((prev) => ({
+      ...prev,
+      company: {
+        ...prev.company,
+        name: company.companyName || prev.company.name,
+        contact: company.companyPhone || prev.company.contact,
+      },
+    }));
+  }, [company]);
 
   const updateNestedField = (section: "company" | "vendor" | "orderInfo", field: string) => (
     e: React.ChangeEvent<HTMLInputElement>
@@ -262,37 +282,25 @@ export default function PurchaseOrderPage() {
   };
 
   const checkDuplicate = async () => {
-    const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
-    const payload = buildPurchaseOrderPayload(formData);
-    const resp = await fetch(`${API_BASE_URL}/api/purchaseorder/checkDuplicate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!resp.ok) {
-      throw new Error(`Duplicate check failed (${resp.status})`);
+    if (!token) {
+      throw new Error("Missing auth token");
     }
-    return resp.json();
+
+    const payload = buildPurchaseOrderPayload(formData);
+    return purchaseOrderAPI.checkDuplicate(token, payload);
   };
 
   const updateGoogleSheet = async (uniqueId: string) => {
     try {
-      const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
-      const response = await fetch(`${API_BASE_URL}/api/purchaseorder/updateGoogleSheet`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          ...formData,
-          uniqueId: uniqueId || undefined,
-        }),
+      if (!token) {
+        throw new Error("Missing auth token");
+      }
+
+      await purchaseOrderAPI.updateGoogleSheet(token, {
+        ...formData,
+        uniqueId: uniqueId || undefined,
       });
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(`Failed to update Google Sheet: ${errorData.message || "Unknown error"}`);
-      }
       console.log("Google Sheet updated successfully");
     } catch (error) {
       console.error("Error updating Google Sheet:", error);
@@ -373,7 +381,6 @@ export default function PurchaseOrderPage() {
         return;
       }
 
-      const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
       const payload = buildPurchaseOrderPayload(formData);
 
       let newUnique = "";
@@ -383,13 +390,12 @@ export default function PurchaseOrderPage() {
         if (dup?.exists) {
           newUnique = dup.unique_id || "";
         } else {
-          const response = await fetch(`${API_BASE_URL}/api/purchaseorder`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-          });
-          if (response.ok) {
-            const responseData = await response.json();
+          if (!token) {
+            throw new Error("Missing auth token");
+          }
+
+          const responseData = await purchaseOrderAPI.create(token, payload);
+          if (responseData?.success) {
             newUnique = responseData.unique_id || responseData.data?.unique_id || newUnique;
             createdNew = true;
           } else {
@@ -479,18 +485,11 @@ export default function PurchaseOrderPage() {
       }
 
       const payload = buildPurchaseOrderPayload(formData);
-      const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
-      const response = await fetch(`${API_BASE_URL}/api/purchaseorder`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      
-      if (!response.ok) {
-        throw new Error(`Failed to submit order`);
+      if (!token) {
+        throw new Error("Missing auth token");
       }
-      
-      const responseData = await response.json();
+
+      const responseData = await purchaseOrderAPI.create(token, payload);
       const receivedUniqueId = responseData.unique_id || responseData.data?.unique_id || "";
 
       try {
@@ -500,6 +499,9 @@ export default function PurchaseOrderPage() {
       }
 
       setSubmitStatus("success");
+      setTimeout(() => {
+        router.push("/dashboard");
+      }, 1500);
     } catch (error) {
       console.error("[PO][UI] Error submitting order:", error);
       setSubmitStatus("error");
