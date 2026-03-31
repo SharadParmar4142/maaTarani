@@ -7,6 +7,27 @@ const {
   getAllowedNextStatuses,
   canTransitionStatus,
 } = require("../utils/poStatusTransitions");
+const {
+  PO_STATUS_FOR_TRUCK_ALLOCATION,
+  TRUCK_STATUSES,
+} = require("../utils/truckTrackingConstants");
+
+const TRUCK_STATUS_ORDER = {
+  [TRUCK_STATUSES.UNDER_LOADING]: 1,
+  [TRUCK_STATUSES.DISPATCHED]: 2,
+  [TRUCK_STATUSES.DELIVERED]: 3,
+  [TRUCK_STATUSES.RECEIVING]: 4,
+};
+
+const REQUIRED_TRUCK_STATUS_BY_PO_TARGET = {
+  [PO_STATUSES.SORTING]: TRUCK_STATUSES.DISPATCHED,
+  [PO_STATUSES.SHIPPING]: TRUCK_STATUSES.DELIVERED,
+  [PO_STATUSES.FINAL_DELIVERY]: TRUCK_STATUSES.RECEIVING,
+};
+
+function hasReachedTruckStatus(currentStatus, requiredStatus) {
+  return (TRUCK_STATUS_ORDER[currentStatus] || 0) >= (TRUCK_STATUS_ORDER[requiredStatus] || 0);
+}
 
 // ===== Duplicate detection helpers =====
 function toFixed2(num) {
@@ -427,6 +448,44 @@ const updatePurchaseOrderStatus = asyncHandler(async (req, res) => {
         allowedNextStatuses.length > 0 ? allowedNextStatuses.join(", ") : "none"
       }`
     );
+  }
+
+  // PO cannot move past UnderLoading unless truck allocation/progress prerequisites are met.
+  if (!isSameStatus) {
+    const requiredTruckStatus = REQUIRED_TRUCK_STATUS_BY_PO_TARGET[status];
+
+    if (requiredTruckStatus) {
+      const trucks = await prisma.truckAllocation.findMany({
+        where: { purchaseOrderId: id },
+        select: {
+          truckNumber: true,
+          status: true,
+        },
+      });
+
+      if (trucks.length === 0) {
+        res.status(400);
+        throw new Error(
+          `Cannot move PO to ${status}. Allocate at least one truck while PO is in ${PO_STATUS_FOR_TRUCK_ALLOCATION} (UnderLoading).`
+        );
+      }
+
+      const laggingTrucks = trucks.filter(
+        (truck) => !hasReachedTruckStatus(truck.status, requiredTruckStatus)
+      );
+
+      if (laggingTrucks.length > 0) {
+        const sampleTrucks = laggingTrucks
+          .slice(0, 5)
+          .map((truck) => `${truck.truckNumber} (${truck.status})`)
+          .join(", ");
+
+        res.status(400);
+        throw new Error(
+          `Cannot move PO to ${status}. All allocated trucks must be at least ${requiredTruckStatus}. Pending trucks: ${sampleTrucks}`
+        );
+      }
+    }
   }
 
   const nextReviewNote =

@@ -37,6 +37,48 @@ export type POStatus =
   | 'FINAL_DELIVERY'
   | 'REJECTED';
 
+export type TruckStatus =
+  | 'UNDER_LOADING'
+  | 'DISPATCHED'
+  | 'DELIVERED'
+  | 'RECEIVING';
+
+export interface TruckDeliveredItemSummary {
+  lineItemId: string;
+  description: string;
+  quantity: number;
+}
+
+export interface TruckSummary {
+  id: string;
+  truckNumber: string;
+  status: TruckStatus;
+  materialLineItemId: string;
+  materialDescription: string;
+  nextStatus: TruckStatus | null;
+  deliveredItems: TruckDeliveredItemSummary[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RemainingByItemSummary {
+  lineItemId: string;
+  description: string;
+  orderedQuantity: number;
+  deliveredQuantity: number;
+  remainingQuantity: number;
+}
+
+export interface OrderTruckSummary {
+  purchaseOrderId: string;
+  purchaseOrderStatus: POStatus;
+  canAllocateTrucks: boolean;
+  truckCount: number;
+  trucks: TruckSummary[];
+  remainingByItem: RemainingByItemSummary[];
+  remainingTotalQuantity: number;
+}
+
 // API Helper Function
 async function apiCall(endpoint: string, options: RequestInit = {}) {
   const url = `${API_BASE_URL}${endpoint}`;
@@ -179,6 +221,75 @@ export const purchaseOrderAPI = {
         Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({ status, reviewNote }),
+    });
+  },
+};
+
+export const truckTrackingAPI = {
+  getOrderSummary: async (token: string, purchaseOrderId: string): Promise<{ success: boolean; data: OrderTruckSummary }> => {
+    return apiCall(`/api/trucks/${purchaseOrderId}`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+  },
+
+  getSummariesForOrders: async (
+    token: string,
+    orderIds: string[]
+  ): Promise<{ success: boolean; data: Record<string, OrderTruckSummary> }> => {
+    return apiCall('/api/trucks/summaries', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ orderIds }),
+    });
+  },
+
+  allocateTrucks: async (
+    token: string,
+    purchaseOrderId: string,
+    truckCount: number,
+    allocations: Array<{ truckNumber: string; lineItemId: string }>
+  ): Promise<{ success: boolean; data: OrderTruckSummary; message: string }> => {
+    return apiCall(`/api/trucks/${purchaseOrderId}/allocate`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ truckCount, allocations }),
+    });
+  },
+
+  updateTruckStatus: async (
+    token: string,
+    purchaseOrderId: string,
+    truckId: string,
+    status: TruckStatus
+  ): Promise<{ success: boolean; data: OrderTruckSummary; message: string }> => {
+    return apiCall(`/api/trucks/${purchaseOrderId}/${truckId}/status`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ status }),
+    });
+  },
+
+  setTruckDeliveredItems: async (
+    token: string,
+    purchaseOrderId: string,
+    truckId: string,
+    quantity: number
+  ): Promise<{ success: boolean; data: OrderTruckSummary; message: string }> => {
+    return apiCall(`/api/trucks/${purchaseOrderId}/${truckId}/delivered-items`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ quantity }),
     });
   },
 };

@@ -69,6 +69,7 @@ model PurchaseOrder {
   taxAmount             Float?
   total                 Float
   lineItems             LineItem[]
+  trucks                TruckAllocation[]
   createdAt             DateTime    @default(now())
   updatedAt             DateTime    @updatedAt
 
@@ -84,8 +85,41 @@ model LineItem {
   rate              Float
   amount            Float
   gst               Float?
+  truckAllocations  TruckAllocation[]
+  truckDeliveredItems TruckDeliveredItem[]
   createdAt         DateTime        @default(now())
   updatedAt         DateTime        @updatedAt
 
   @@map("line_items")
+}
+
+model TruckAllocation {
+  id                String              @id @default(auto()) @map("_id") @db.ObjectId
+  purchaseOrderId   String              @db.ObjectId
+  purchaseOrder     PurchaseOrder       @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  lineItemId        String              @db.ObjectId
+  lineItem          LineItem            @relation(fields: [lineItemId], references: [id], onDelete: Cascade)
+  truckNumber       String
+  status            String              @default("UNDER_LOADING")
+  deliveredItems    TruckDeliveredItem[]
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  @@unique([purchaseOrderId, truckNumber])
+  @@map("truck_allocations")
+}
+
+model TruckDeliveredItem {
+  id                String            @id @default(auto()) @map("_id") @db.ObjectId
+  truckAllocationId String            @db.ObjectId
+  truckAllocation   TruckAllocation   @relation(fields: [truckAllocationId], references: [id], onDelete: Cascade)
+  lineItemId        String            @db.ObjectId
+  lineItem          LineItem          @relation(fields: [lineItemId], references: [id], onDelete: Cascade)
+  quantity          Float
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  @@unique([truckAllocationId])
+  @@unique([truckAllocationId, lineItemId])
+  @@map("truck_delivered_items")
 }

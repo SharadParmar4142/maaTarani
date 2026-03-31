@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/contexts/AuthContext";
-import { purchaseOrderAPI } from "@/lib/api";
+import { OrderTruckSummary, purchaseOrderAPI, truckTrackingAPI } from "@/lib/api";
 
 type POStatus =
   | "PENDING"
@@ -71,6 +71,8 @@ export default function UserDashboardPage() {
   const [loadingOrders, setLoadingOrders] = useState(false);
   const [error, setError] = useState("");
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
+  const [truckSummaryByOrder, setTruckSummaryByOrder] = useState<Record<string, OrderTruckSummary>>({});
+  const [showTruckNumbersForOrder, setShowTruckNumbersForOrder] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
@@ -92,8 +94,17 @@ export default function UserDashboardPage() {
       setError("");
       try {
         const response = await purchaseOrderAPI.getMyOrders(token);
-        setOrders(response.data || []);
+        const ordersData = response.data || [];
+        setOrders(ordersData);
         setCounts(response.counts || { pending: 0, inProgress: 0, delivered: 0, rejected: 0, total: 0 });
+
+        const orderIds = ordersData.map((order: Order) => order.id);
+        if (orderIds.length > 0) {
+          const truckResponse = await truckTrackingAPI.getSummariesForOrders(token, orderIds);
+          setTruckSummaryByOrder(truckResponse.data || {});
+        } else {
+          setTruckSummaryByOrder({});
+        }
       } catch (err: any) {
         setError(err.message || "Failed to load purchase orders");
       } finally {
@@ -118,6 +129,17 @@ export default function UserDashboardPage() {
   };
 
   const getStepIndex = (status: POStatus) => PO_TRACKING_STEPS.findIndex((step) => step === status);
+
+  const remainingQuantityForOrder = (orderId: string) => {
+    const summary = truckSummaryByOrder[orderId];
+    if (!summary) {
+      return "-";
+    }
+
+    return `${summary.remainingTotalQuantity.toFixed(3)} MT`;
+  };
+
+  const truckCountForOrder = (orderId: string) => truckSummaryByOrder[orderId]?.truckCount || 0;
 
   const cards = useMemo(
     () => [
@@ -177,6 +199,8 @@ export default function UserDashboardPage() {
                     <th className="px-3 py-2">Vendor</th>
                     <th className="px-3 py-2">Total</th>
                     <th className="px-3 py-2">Status</th>
+                    <th className="px-3 py-2">Trucks</th>
+                    <th className="px-3 py-2">Remaining Qty</th>
                     <th className="px-3 py-2">Submitted</th>
                     <th className="px-3 py-2">Review Note</th>
                     <th className="px-3 py-2">Action</th>
@@ -193,6 +217,18 @@ export default function UserDashboardPage() {
                           {STATUS_LABEL[order.status]}
                         </span>
                       </td>
+                      <td className="px-3 py-2">
+                        <button
+                          onClick={() => {
+                            setSelectedOrder(order);
+                            setShowTruckNumbersForOrder((prev) => ({ ...prev, [order.id]: true }));
+                          }}
+                          className="rounded-lg border border-gray-300 px-2 py-1 text-xs font-semibold text-gray-700 hover:bg-gray-100"
+                        >
+                          {truckCountForOrder(order.id)} truck(s)
+                        </button>
+                      </td>
+                      <td className="px-3 py-2">{remainingQuantityForOrder(order.id)}</td>
                       <td className="px-3 py-2">{new Date(order.createdAt).toLocaleDateString()}</td>
                       <td className="px-3 py-2">{order.reviewNote || "-"}</td>
                       <td className="px-3 py-2">
@@ -292,6 +328,68 @@ export default function UserDashboardPage() {
               <p><span className="font-semibold">Submitted:</span> {new Date(selectedOrder.createdAt).toLocaleString()}</p>
               <p><span className="font-semibold">Reviewed At:</span> {selectedOrder.reviewedAt ? new Date(selectedOrder.reviewedAt).toLocaleString() : "-"}</p>
               <p><span className="font-semibold">Review Note:</span> {selectedOrder.reviewNote || "-"}</p>
+              <p><span className="font-semibold">Remaining Quantity:</span> {remainingQuantityForOrder(selectedOrder.id)}</p>
+              <p>
+                <span className="font-semibold">Allocated Trucks:</span>{" "}
+                <button
+                  onClick={() =>
+                    setShowTruckNumbersForOrder((prev) => ({
+                      ...prev,
+                      [selectedOrder.id]: !prev[selectedOrder.id],
+                    }))
+                  }
+                  className="rounded border border-gray-300 px-2 py-0.5 text-xs font-semibold text-gray-700 hover:bg-gray-100"
+                >
+                  {truckCountForOrder(selectedOrder.id)} truck(s)
+                </button>
+              </p>
+            </div>
+
+            {showTruckNumbersForOrder[selectedOrder.id] && (
+              <div className="mt-5 rounded-xl border border-gray-200 p-4">
+                <h3 className="mb-2 text-base font-semibold text-gray-900">Assigned Truck Numbers</h3>
+                {!truckSummaryByOrder[selectedOrder.id] || truckSummaryByOrder[selectedOrder.id].truckCount === 0 ? (
+                  <p className="text-sm text-gray-600">No trucks assigned yet.</p>
+                ) : (
+                  <ul className="list-disc space-y-1 pl-5 text-sm text-gray-700">
+                    {truckSummaryByOrder[selectedOrder.id].trucks.map((truck) => (
+                      <li key={truck.id}>
+                        {truck.truckNumber} - {truck.materialDescription || "Material not set"} ({truck.status.replace(/_/g, " ")})
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+
+            <div className="mt-5 rounded-xl border border-gray-200 p-4">
+              <h3 className="mb-2 text-base font-semibold text-gray-900">Remaining Quantity</h3>
+              {!truckSummaryByOrder[selectedOrder.id] || truckSummaryByOrder[selectedOrder.id].remainingByItem.length === 0 ? (
+                <p className="text-sm text-gray-600">No remaining quantity data available.</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full border border-gray-200 text-sm">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="border border-gray-200 px-3 py-2 text-left">Item</th>
+                        <th className="border border-gray-200 px-3 py-2 text-right">Ordered</th>
+                        <th className="border border-gray-200 px-3 py-2 text-right">Delivered</th>
+                        <th className="border border-gray-200 px-3 py-2 text-right">Remaining</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {truckSummaryByOrder[selectedOrder.id].remainingByItem.map((item) => (
+                        <tr key={item.lineItemId}>
+                          <td className="border border-gray-200 px-3 py-2">{item.description}</td>
+                          <td className="border border-gray-200 px-3 py-2 text-right">{item.orderedQuantity}</td>
+                          <td className="border border-gray-200 px-3 py-2 text-right">{item.deliveredQuantity.toFixed(3)}</td>
+                          <td className="border border-gray-200 px-3 py-2 text-right">{item.remainingQuantity.toFixed(3)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
 
             <div className="mt-5">

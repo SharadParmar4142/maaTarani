@@ -4,7 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/contexts/AuthContext";
-import { purchaseOrderAPI } from "@/lib/api";
+import { OrderTruckSummary, purchaseOrderAPI, truckTrackingAPI, TruckStatus } from "@/lib/api";
+import { AlertCircle, CheckCircle2, X } from "lucide-react";
 
 type POStatus =
   | "PENDING"
@@ -35,6 +36,19 @@ const NEXT_STATUS: Partial<Record<POStatus, POStatus>> = {
   PACKING: "SORTING",
   SORTING: "SHIPPING",
   SHIPPING: "FINAL_DELIVERY",
+};
+
+const TRUCK_STATUS_LABEL: Record<TruckStatus, string> = {
+  UNDER_LOADING: "UnderLoading",
+  DISPATCHED: "Dispatched",
+  DELIVERED: "Delivered",
+  RECEIVING: "Receiving",
+};
+
+const NEXT_TRUCK_STATUS: Partial<Record<TruckStatus, TruckStatus>> = {
+  UNDER_LOADING: "DISPATCHED",
+  DISPATCHED: "DELIVERED",
+  DELIVERED: "RECEIVING",
 };
 
 type Order = {
@@ -85,6 +99,8 @@ type OrderBuckets = {
   rejected: Order[];
 };
 
+type NotificationTone = "success" | "error";
+
 export default function AdminDashboardPage() {
   const router = useRouter();
   const { token, isAuthenticated, isLoading, isAdmin } = useAuth();
@@ -95,6 +111,30 @@ export default function AdminDashboardPage() {
   const [loading, setLoading] = useState(false);
   const [noteByOrder, setNoteByOrder] = useState<Record<string, string>>({});
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
+  const [truckSummaryByOrder, setTruckSummaryByOrder] = useState<Record<string, OrderTruckSummary>>({});
+  const [allocationCountByOrder, setAllocationCountByOrder] = useState<Record<string, string>>({});
+  const [allocationRowsByOrder, setAllocationRowsByOrder] = useState<
+    Record<string, Array<{ truckNumber: string; lineItemId: string }>>
+  >({});
+  const [deliveredQtyByTruck, setDeliveredQtyByTruck] = useState<Record<string, string>>({});
+  const [loadingTruckSummary, setLoadingTruckSummary] = useState(false);
+  const [notification, setNotification] = useState<{ message: string; tone: NotificationTone } | null>(null);
+
+  const notify = (message: string, tone: NotificationTone = "success") => {
+    setNotification({ message, tone });
+  };
+
+  useEffect(() => {
+    if (!notification) {
+      return;
+    }
+
+    const timeoutId = setTimeout(() => {
+      setNotification(null);
+    }, 2600);
+
+    return () => clearTimeout(timeoutId);
+  }, [notification]);
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
@@ -133,6 +173,21 @@ export default function AdminDashboardPage() {
         rejected: responseCounts.rejected || 0,
         total: responseCounts.total || 0,
       });
+
+      const allOrders = [
+        ...(data.pending || []),
+        ...(data.inProgress || data.accepted || []),
+        ...(data.delivered || []),
+        ...(data.rejected || []),
+      ];
+
+      const orderIds = allOrders.map((order: Order) => order.id);
+      if (orderIds.length > 0) {
+        const summaryResponse = await truckTrackingAPI.getSummariesForOrders(token, orderIds);
+        setTruckSummaryByOrder(summaryResponse.data || {});
+      } else {
+        setTruckSummaryByOrder({});
+      }
     } catch (err: any) {
       setError(err.message || "Failed to load dashboard data");
     } finally {
@@ -168,8 +223,136 @@ export default function AdminDashboardPage() {
     try {
       await purchaseOrderAPI.updateStatus(token, orderId, status, noteByOrder[orderId] || "");
       await loadData();
+      notify(`PO moved to ${STATUS_LABEL[status]}`, "success");
     } catch (err: any) {
-      setError(err.message || "Failed to update order status");
+      const message = err.message || "Failed to update order status";
+      setError(message);
+      notify(message, "error");
+    }
+  };
+
+  const remainingQuantityForOrder = (orderId: string) => {
+    const summary = truckSummaryByOrder[orderId];
+    if (!summary) {
+      return "-";
+    }
+
+    return `${summary.remainingTotalQuantity.toFixed(3)} MT`;
+  };
+
+  const loadTruckSummaryForSelectedOrder = async (orderId: string) => {
+    if (!token) {
+      return;
+    }
+
+    setLoadingTruckSummary(true);
+    try {
+      const response = await truckTrackingAPI.getOrderSummary(token, orderId);
+      setTruckSummaryByOrder((prev) => ({ ...prev, [orderId]: response.data }));
+    } catch (err: any) {
+      setError(err.message || "Failed to load truck summary");
+    } finally {
+      setLoadingTruckSummary(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!selectedOrder || !token) {
+      return;
+    }
+
+    if (!truckSummaryByOrder[selectedOrder.id]) {
+      loadTruckSummaryForSelectedOrder(selectedOrder.id);
+    }
+  }, [selectedOrder, token]);
+
+  const allocateTrucks = async (orderId: string) => {
+    if (!token) {
+      return;
+    }
+
+    const count = Number(allocationCountByOrder[orderId] || 0);
+    const allocations = allocationRowsByOrder[orderId] || [];
+
+    if (!count || count <= 0) {
+      const message = "Please enter a valid truck count";
+      setError(message);
+      notify(message, "error");
+      return;
+    }
+
+    if (allocations.length !== count) {
+      const message = `You entered ${allocations.length} truck rows, but truck count is ${count}`;
+      setError(message);
+      notify(message, "error");
+      return;
+    }
+
+    const missingDetails = allocations.some(
+      (entry) => !String(entry.truckNumber || "").trim() || !String(entry.lineItemId || "").trim()
+    );
+
+    if (missingDetails) {
+      const message = "Please enter truck number and material for each truck row";
+      setError(message);
+      notify(message, "error");
+      return;
+    }
+
+    try {
+      const response = await truckTrackingAPI.allocateTrucks(token, orderId, count, allocations);
+      setTruckSummaryByOrder((prev) => ({ ...prev, [orderId]: response.data }));
+      setAllocationCountByOrder((prev) => ({ ...prev, [orderId]: "" }));
+      setAllocationRowsByOrder((prev) => ({ ...prev, [orderId]: [] }));
+      setError("");
+      notify(response.message || "Trucks allocated successfully", "success");
+    } catch (err: any) {
+      const message = err.message || "Failed to allocate trucks";
+      setError(message);
+      notify(message, "error");
+    }
+  };
+
+  const updateTruckStatus = async (orderId: string, truckId: string, status: TruckStatus) => {
+    if (!token) {
+      return;
+    }
+
+    try {
+      const response = await truckTrackingAPI.updateTruckStatus(token, orderId, truckId, status);
+      setTruckSummaryByOrder((prev) => ({ ...prev, [orderId]: response.data }));
+      setError("");
+      notify(`Truck moved to ${TRUCK_STATUS_LABEL[status]}`, "success");
+    } catch (err: any) {
+      const message = err.message || "Failed to update truck status";
+      setError(message);
+      notify(message, "error");
+    }
+  };
+
+  const saveDeliveredItemsForTruck = async (orderId: string, truckId: string) => {
+    if (!token) {
+      return;
+    }
+
+    const quantity = Number(deliveredQtyByTruck[truckId] || 0);
+
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      const message = "Please enter delivered quantity for this truck material";
+      setError(message);
+      notify(message, "error");
+      return;
+    }
+
+    try {
+      const response = await truckTrackingAPI.setTruckDeliveredItems(token, orderId, truckId, quantity);
+      setTruckSummaryByOrder((prev) => ({ ...prev, [orderId]: response.data }));
+      setError("");
+      notify(response.message || "Delivered quantities saved successfully", "success");
+    } catch (err: any) {
+      const message = err.message || "Failed to save delivered quantities";
+      setError(message);
+      notify(message, "error");
     }
   };
 
@@ -192,6 +375,33 @@ export default function AdminDashboardPage() {
 
   return (
     <div className="min-h-screen bg-gray-50 px-4 py-8 md:px-8">
+      {notification && (
+        <div className="fixed right-4 top-4 z-100 w-90 max-w-[calc(100vw-2rem)]">
+          <div
+            className={`rounded-xl border px-4 py-3 shadow-lg backdrop-blur-sm ${
+              notification.tone === "success"
+                ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                : "border-rose-200 bg-rose-50 text-rose-900"
+            }`}
+          >
+            <div className="flex items-start gap-3">
+              {notification.tone === "success" ? (
+                <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0" />
+              ) : (
+                <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" />
+              )}
+              <p className="flex-1 text-sm font-medium leading-5">{notification.message}</p>
+              <button
+                onClick={() => setNotification(null)}
+                className="rounded p-1 opacity-80 transition hover:bg-black/5 hover:opacity-100"
+                aria-label="Dismiss notification"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="mx-auto max-w-7xl space-y-8">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
@@ -231,6 +441,7 @@ export default function AdminDashboardPage() {
             <div className="space-y-4">
               {currentOrders.map((order) => {
                 const nextStatus = NEXT_STATUS[order.status];
+                const isExpanded = selectedOrder?.id === order.id;
 
                 return (
                   <div key={order.id} className="rounded-lg border border-gray-200 p-4">
@@ -247,12 +458,14 @@ export default function AdminDashboardPage() {
                       </div>
                       <div className="text-sm text-gray-600">
                         <p>Total: INR {Number(order.total || 0).toFixed(2)}</p>
+                        <p>Remaining Qty: {remainingQuantityForOrder(order.id)}</p>
+                        <p>Trucks: {truckSummaryByOrder[order.id]?.truckCount || 0}</p>
                         <p>Submitted: {new Date(order.createdAt).toLocaleString()}</p>
                         <button
-                          onClick={() => setSelectedOrder(order)}
+                          onClick={() => setSelectedOrder((prev) => (prev?.id === order.id ? null : order))}
                           className="mt-2 rounded-lg border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-700 hover:bg-gray-100"
                         >
-                          View Details
+                          {isExpanded ? "Hide Details" : "View Details"}
                         </button>
                       </div>
                     </div>
@@ -287,80 +500,263 @@ export default function AdminDashboardPage() {
                     {!nextStatus && order.status !== "PENDING" && (
                       <p className="mt-3 text-sm text-gray-600">Note: {order.reviewNote || "-"}</p>
                     )}
+
+                    {isExpanded && (
+                      <div className="mt-5 rounded-xl border border-gray-200 bg-white p-6">
+                        <div className="mb-3 flex items-center justify-between">
+                          <h2 className="text-xl font-bold text-gray-900">PO Details: #{order.poNumber}</h2>
+                          <button
+                            onClick={() => setSelectedOrder(null)}
+                            className="rounded-lg border border-gray-300 px-3 py-1 text-sm font-semibold text-gray-700 hover:bg-gray-100"
+                          >
+                            Close
+                          </button>
+                        </div>
+
+                        <div className="grid gap-2 text-sm text-gray-700 md:grid-cols-2">
+                          <p><span className="font-semibold">Buyer:</span> {order.companyName}</p>
+                          <p><span className="font-semibold">Buyer Address:</span> {order.companyAddress}</p>
+                          <p><span className="font-semibold">Buyer City/State/Zip:</span> {order.companyCityStateZip}</p>
+                          <p><span className="font-semibold">Buyer Country:</span> {order.companyCountry}</p>
+                          <p><span className="font-semibold">Buyer Contact:</span> {order.companyContact || "-"}</p>
+                          <p><span className="font-semibold">Vendor:</span> {order.vendorName}</p>
+                          <p><span className="font-semibold">Vendor Address:</span> {order.vendorAddress}</p>
+                          <p><span className="font-semibold">Vendor City/State/Zip:</span> {order.vendorCityStateZip}</p>
+                          <p><span className="font-semibold">Vendor Country:</span> {order.vendorCountry}</p>
+                          <p><span className="font-semibold">Order Date:</span> {order.orderDate ? new Date(order.orderDate).toLocaleDateString() : "-"}</p>
+                          <p><span className="font-semibold">Delivery Date:</span> {order.deliveryDate ? new Date(order.deliveryDate).toLocaleDateString() : "-"}</p>
+                          <p><span className="font-semibold">Sub Total:</span> INR {Number(order.subTotal || 0).toFixed(2)}</p>
+                          <p><span className="font-semibold">Total:</span> INR {Number(order.total || 0).toFixed(2)}</p>
+                          <p><span className="font-semibold">Status:</span> {STATUS_LABEL[order.status]}</p>
+                          <p><span className="font-semibold">Submitted:</span> {new Date(order.createdAt).toLocaleString()}</p>
+                          <p><span className="font-semibold">User:</span> {order.user?.name || "-"} ({order.user?.email || "-"})</p>
+                          <p><span className="font-semibold">Reviewed At:</span> {order.reviewedAt ? new Date(order.reviewedAt).toLocaleString() : "-"}</p>
+                          <p><span className="font-semibold">Reviewed By:</span> {order.reviewedBy ? `${order.reviewedBy.name} (${order.reviewedBy.email})` : "-"}</p>
+                          <p><span className="font-semibold">Review Note:</span> {order.reviewNote || "-"}</p>
+                          <p><span className="font-semibold">Remaining Quantity:</span> {remainingQuantityForOrder(order.id)}</p>
+                        </div>
+
+                        <div className="mt-5 rounded-xl border border-gray-200 p-4">
+                          <h3 className="mb-3 text-base font-semibold text-gray-900">Truck Management</h3>
+                          {loadingTruckSummary ? (
+                            <p className="text-sm text-gray-600">Loading truck details...</p>
+                          ) : (
+                            <>
+                              {order.status === "PACKING" && (
+                                <div className="mb-4 grid gap-3 rounded-lg border border-gray-200 bg-gray-50 p-3 md:grid-cols-2">
+                                  <div>
+                                    <label className="mb-1 block text-xs font-semibold text-gray-700">Number of trucks</label>
+                                    <input
+                                      type="number"
+                                      min={1}
+                                      value={allocationCountByOrder[order.id] || ""}
+                                      onChange={(e) => {
+                                        const nextCountValue = e.target.value;
+                                        setAllocationCountByOrder((prev) => ({ ...prev, [order.id]: nextCountValue }));
+
+                                        const nextCount = Number(nextCountValue || 0);
+                                        const previousRows = allocationRowsByOrder[order.id] || [];
+
+                                        const nextRows = Array.from({ length: Math.max(nextCount, 0) }, (_, index) => ({
+                                          truckNumber: previousRows[index]?.truckNumber || "",
+                                          lineItemId: previousRows[index]?.lineItemId || "",
+                                        }));
+
+                                        setAllocationRowsByOrder((prev) => ({ ...prev, [order.id]: nextRows }));
+                                      }}
+                                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                                      placeholder="e.g. 5"
+                                    />
+                                  </div>
+                                  <div className="md:col-span-2">
+                                    <label className="mb-2 block text-xs font-semibold text-gray-700">Truck rows with material (one material per truck)</label>
+                                    <div className="space-y-2">
+                                      {(allocationRowsByOrder[order.id] || []).map((row, index) => (
+                                        <div key={`${order.id}-alloc-${index}`} className="grid gap-2 md:grid-cols-2">
+                                          <input
+                                            value={row.truckNumber}
+                                            onChange={(e) =>
+                                              setAllocationRowsByOrder((prev) => ({
+                                                ...prev,
+                                                [order.id]: (prev[order.id] || []).map((entry, entryIndex) =>
+                                                  entryIndex === index
+                                                    ? { ...entry, truckNumber: e.target.value.toUpperCase().replace(/\s+/g, "") }
+                                                    : entry
+                                                ),
+                                              }))
+                                            }
+                                            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                                            placeholder="Truck number (MH02AC2111)"
+                                          />
+                                          <select
+                                            value={row.lineItemId}
+                                            onChange={(e) =>
+                                              setAllocationRowsByOrder((prev) => ({
+                                                ...prev,
+                                                [order.id]: (prev[order.id] || []).map((entry, entryIndex) =>
+                                                  entryIndex === index ? { ...entry, lineItemId: e.target.value } : entry
+                                                ),
+                                              }))
+                                            }
+                                            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                                          >
+                                            <option value="">Select material</option>
+                                            {(order.lineItems || []).map((lineItem) => (
+                                              <option key={lineItem.id} value={lineItem.id}>
+                                                {lineItem.description}
+                                              </option>
+                                            ))}
+                                          </select>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                  <div className="md:col-span-2">
+                                    <button
+                                      onClick={() => allocateTrucks(order.id)}
+                                      className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700"
+                                    >
+                                      Allocate Trucks
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+
+                              {!truckSummaryByOrder[order.id] || truckSummaryByOrder[order.id].truckCount === 0 ? (
+                                <p className="text-sm text-gray-600">No trucks allocated yet.</p>
+                              ) : (
+                                <div className="space-y-3">
+                                  {truckSummaryByOrder[order.id].trucks.map((truck) => {
+                                    const nextTruckStatus = NEXT_TRUCK_STATUS[truck.status];
+
+                                    return (
+                                      <div key={truck.id} className="rounded-lg border border-gray-200 p-3">
+                                        <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                                          <div>
+                                            <p className="text-sm font-semibold text-gray-900">{truck.truckNumber}</p>
+                                            <p className="text-xs text-gray-600">Status: {TRUCK_STATUS_LABEL[truck.status]}</p>
+                                            <p className="text-xs text-gray-600">Material: {truck.materialDescription || "-"}</p>
+                                          </div>
+                                          <div className="flex gap-2">
+                                            {nextTruckStatus && (
+                                              <button
+                                                onClick={() => updateTruckStatus(order.id, truck.id, nextTruckStatus)}
+                                                className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
+                                              >
+                                                Move to {TRUCK_STATUS_LABEL[nextTruckStatus]}
+                                              </button>
+                                            )}
+                                          </div>
+                                        </div>
+
+                                        {truck.status === "DELIVERED" && (
+                                          <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                                            <p className="mb-2 text-xs font-semibold text-amber-900">
+                                              Set delivered quantity for material: {truck.materialDescription || "Assigned Material"}
+                                            </p>
+                                            <div className="flex items-center gap-2">
+                                              <label className="w-40 text-xs text-gray-700">Quantity</label>
+                                              <input
+                                                type="number"
+                                                min={0}
+                                                step="0.001"
+                                                value={deliveredQtyByTruck[truck.id] || ""}
+                                                onChange={(e) =>
+                                                  setDeliveredQtyByTruck((prev) => ({
+                                                    ...prev,
+                                                    [truck.id]: e.target.value,
+                                                  }))
+                                                }
+                                                className="w-full rounded border border-gray-300 px-2 py-1 text-xs"
+                                                placeholder="0"
+                                              />
+                                            </div>
+                                            <button
+                                              onClick={() => saveDeliveredItemsForTruck(order.id, truck.id)}
+                                              className="mt-3 rounded bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700"
+                                            >
+                                              Save Delivered Quantities
+                                            </button>
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </>
+                          )}
+                        </div>
+
+                        <div className="mt-5 rounded-xl border border-gray-200 p-4">
+                          <h3 className="mb-2 text-base font-semibold text-gray-900">Remaining Quantity</h3>
+                          {!truckSummaryByOrder[order.id] || truckSummaryByOrder[order.id].remainingByItem.length === 0 ? (
+                            <p className="text-sm text-gray-600">No remaining quantity data available.</p>
+                          ) : (
+                            <div className="overflow-x-auto">
+                              <table className="min-w-full border border-gray-200 text-sm">
+                                <thead className="bg-gray-50">
+                                  <tr>
+                                    <th className="border border-gray-200 px-3 py-2 text-left">Item</th>
+                                    <th className="border border-gray-200 px-3 py-2 text-right">Ordered</th>
+                                    <th className="border border-gray-200 px-3 py-2 text-right">Delivered</th>
+                                    <th className="border border-gray-200 px-3 py-2 text-right">Remaining</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {truckSummaryByOrder[order.id].remainingByItem.map((item) => (
+                                    <tr key={item.lineItemId}>
+                                      <td className="border border-gray-200 px-3 py-2">{item.description}</td>
+                                      <td className="border border-gray-200 px-3 py-2 text-right">{item.orderedQuantity}</td>
+                                      <td className="border border-gray-200 px-3 py-2 text-right">{item.deliveredQuantity.toFixed(3)}</td>
+                                      <td className="border border-gray-200 px-3 py-2 text-right">{item.remainingQuantity.toFixed(3)}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="mt-5">
+                          <h3 className="mb-2 text-base font-semibold text-gray-900">Line Items</h3>
+                          {!order.lineItems || order.lineItems.length === 0 ? (
+                            <p className="text-sm text-gray-600">No line items available.</p>
+                          ) : (
+                            <div className="overflow-x-auto">
+                              <table className="min-w-full border border-gray-200 text-sm">
+                                <thead className="bg-gray-50">
+                                  <tr>
+                                    <th className="border border-gray-200 px-3 py-2 text-left">Description</th>
+                                    <th className="border border-gray-200 px-3 py-2 text-right">Qty</th>
+                                    <th className="border border-gray-200 px-3 py-2 text-right">Rate</th>
+                                    <th className="border border-gray-200 px-3 py-2 text-right">GST %</th>
+                                    <th className="border border-gray-200 px-3 py-2 text-right">Amount</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {order.lineItems.map((item) => (
+                                    <tr key={item.id}>
+                                      <td className="border border-gray-200 px-3 py-2">{item.description}</td>
+                                      <td className="border border-gray-200 px-3 py-2 text-right">{item.quantity}</td>
+                                      <td className="border border-gray-200 px-3 py-2 text-right">{Number(item.rate || 0).toFixed(2)}</td>
+                                      <td className="border border-gray-200 px-3 py-2 text-right">{item.gst != null ? item.gst : 0}</td>
+                                      <td className="border border-gray-200 px-3 py-2 text-right">{Number(item.amount || 0).toFixed(2)}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })}
             </div>
           )}
         </div>
-
-        {selectedOrder && (
-          <div className="rounded-xl bg-white p-6 shadow-sm border border-gray-100">
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-xl font-bold text-gray-900">PO Details: #{selectedOrder.poNumber}</h2>
-              <button
-                onClick={() => setSelectedOrder(null)}
-                className="rounded-lg border border-gray-300 px-3 py-1 text-sm font-semibold text-gray-700 hover:bg-gray-100"
-              >
-                Close
-              </button>
-            </div>
-
-            <div className="grid gap-2 text-sm text-gray-700 md:grid-cols-2">
-              <p><span className="font-semibold">Buyer:</span> {selectedOrder.companyName}</p>
-              <p><span className="font-semibold">Buyer Address:</span> {selectedOrder.companyAddress}</p>
-              <p><span className="font-semibold">Buyer City/State/Zip:</span> {selectedOrder.companyCityStateZip}</p>
-              <p><span className="font-semibold">Buyer Country:</span> {selectedOrder.companyCountry}</p>
-              <p><span className="font-semibold">Buyer Contact:</span> {selectedOrder.companyContact || "-"}</p>
-              <p><span className="font-semibold">Vendor:</span> {selectedOrder.vendorName}</p>
-              <p><span className="font-semibold">Vendor Address:</span> {selectedOrder.vendorAddress}</p>
-              <p><span className="font-semibold">Vendor City/State/Zip:</span> {selectedOrder.vendorCityStateZip}</p>
-              <p><span className="font-semibold">Vendor Country:</span> {selectedOrder.vendorCountry}</p>
-              <p><span className="font-semibold">Order Date:</span> {selectedOrder.orderDate ? new Date(selectedOrder.orderDate).toLocaleDateString() : "-"}</p>
-              <p><span className="font-semibold">Delivery Date:</span> {selectedOrder.deliveryDate ? new Date(selectedOrder.deliveryDate).toLocaleDateString() : "-"}</p>
-              <p><span className="font-semibold">Sub Total:</span> INR {Number(selectedOrder.subTotal || 0).toFixed(2)}</p>
-              <p><span className="font-semibold">Total:</span> INR {Number(selectedOrder.total || 0).toFixed(2)}</p>
-              <p><span className="font-semibold">Status:</span> {STATUS_LABEL[selectedOrder.status]}</p>
-              <p><span className="font-semibold">Submitted:</span> {new Date(selectedOrder.createdAt).toLocaleString()}</p>
-              <p><span className="font-semibold">User:</span> {selectedOrder.user?.name || "-"} ({selectedOrder.user?.email || "-"})</p>
-              <p><span className="font-semibold">Reviewed At:</span> {selectedOrder.reviewedAt ? new Date(selectedOrder.reviewedAt).toLocaleString() : "-"}</p>
-              <p><span className="font-semibold">Reviewed By:</span> {selectedOrder.reviewedBy ? `${selectedOrder.reviewedBy.name} (${selectedOrder.reviewedBy.email})` : "-"}</p>
-              <p><span className="font-semibold">Review Note:</span> {selectedOrder.reviewNote || "-"}</p>
-            </div>
-
-            <div className="mt-5">
-              <h3 className="mb-2 text-base font-semibold text-gray-900">Line Items</h3>
-              {!selectedOrder.lineItems || selectedOrder.lineItems.length === 0 ? (
-                <p className="text-sm text-gray-600">No line items available.</p>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="min-w-full border border-gray-200 text-sm">
-                    <thead className="bg-gray-50">
-                      <tr>
-                        <th className="border border-gray-200 px-3 py-2 text-left">Description</th>
-                        <th className="border border-gray-200 px-3 py-2 text-right">Qty</th>
-                        <th className="border border-gray-200 px-3 py-2 text-right">Rate</th>
-                        <th className="border border-gray-200 px-3 py-2 text-right">GST %</th>
-                        <th className="border border-gray-200 px-3 py-2 text-right">Amount</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {selectedOrder.lineItems.map((item) => (
-                        <tr key={item.id}>
-                          <td className="border border-gray-200 px-3 py-2">{item.description}</td>
-                          <td className="border border-gray-200 px-3 py-2 text-right">{item.quantity}</td>
-                          <td className="border border-gray-200 px-3 py-2 text-right">{Number(item.rate || 0).toFixed(2)}</td>
-                          <td className="border border-gray-200 px-3 py-2 text-right">{item.gst != null ? item.gst : 0}</td>
-                          <td className="border border-gray-200 px-3 py-2 text-right">{Number(item.amount || 0).toFixed(2)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );
