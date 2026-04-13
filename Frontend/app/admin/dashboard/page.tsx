@@ -24,7 +24,7 @@ const STATUS_LABEL: Record<POStatus, string> = {
   PACKING: "UnderLoading",
   SORTING: "Dispatched",
   SHIPPING: "Delivered",
-  FINAL_DELIVERY: "Receiving",
+  FINAL_DELIVERY: "Receiving Received",
   REJECTED: "Rejected",
 };
 
@@ -35,7 +35,6 @@ const NEXT_STATUS: Partial<Record<POStatus, POStatus>> = {
   PICKING: "PACKING",
   PACKING: "SORTING",
   SORTING: "SHIPPING",
-  SHIPPING: "FINAL_DELIVERY",
 };
 
 const TRUCK_STATUS_LABEL: Record<TruckStatus, string> = {
@@ -48,7 +47,6 @@ const TRUCK_STATUS_LABEL: Record<TruckStatus, string> = {
 const NEXT_TRUCK_STATUS: Partial<Record<TruckStatus, TruckStatus>> = {
   UNDER_LOADING: "DISPATCHED",
   DISPATCHED: "DELIVERED",
-  DELIVERED: "RECEIVING",
 };
 
 type Order = {
@@ -96,6 +94,7 @@ type OrderBuckets = {
   pending: Order[];
   inProgress: Order[];
   delivered: Order[];
+  receivingReceived: Order[];
   rejected: Order[];
 };
 
@@ -104,9 +103,9 @@ type NotificationTone = "success" | "error";
 export default function AdminDashboardPage() {
   const router = useRouter();
   const { token, isAuthenticated, isLoading, isAdmin } = useAuth();
-  const [orders, setOrders] = useState<OrderBuckets>({ pending: [], inProgress: [], delivered: [], rejected: [] });
-  const [counts, setCounts] = useState({ pending: 0, inProgress: 0, delivered: 0, rejected: 0, total: 0 });
-  const [activeTab, setActiveTab] = useState<"pending" | "inProgress" | "delivered" | "rejected">("pending");
+  const [orders, setOrders] = useState<OrderBuckets>({ pending: [], inProgress: [], delivered: [], receivingReceived: [], rejected: [] });
+  const [counts, setCounts] = useState({ pending: 0, inProgress: 0, delivered: 0, receivingPending: 0, receivingReceived: 0, rejected: 0, total: 0 });
+  const [activeTab, setActiveTab] = useState<"pending" | "inProgress" | "delivered" | "rejected" | "receivingPending" | "receivingReceived">("pending");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [noteByOrder, setNoteByOrder] = useState<Record<string, string>>({});
@@ -163,30 +162,52 @@ export default function AdminDashboardPage() {
         pending: data.pending || [],
         inProgress: data.inProgress || data.accepted || [],
         delivered: data.delivered || [],
+        receivingReceived: data.receivingReceived || [],
         rejected: data.rejected || [],
-      });
-
-      setCounts({
-        pending: responseCounts.pending || 0,
-        inProgress: responseCounts.inProgress || responseCounts.accepted || 0,
-        delivered: responseCounts.delivered || 0,
-        rejected: responseCounts.rejected || 0,
-        total: responseCounts.total || 0,
       });
 
       const allOrders = [
         ...(data.pending || []),
         ...(data.inProgress || data.accepted || []),
         ...(data.delivered || []),
+        ...(data.receivingReceived || []),
         ...(data.rejected || []),
       ];
 
       const orderIds = allOrders.map((order: Order) => order.id);
       if (orderIds.length > 0) {
         const summaryResponse = await truckTrackingAPI.getSummariesForOrders(token, orderIds);
-        setTruckSummaryByOrder(summaryResponse.data || {});
+        const summaryMap = summaryResponse.data || {};
+        setTruckSummaryByOrder(summaryMap);
+
+        const uniqueOrders = Array.from(new Map(allOrders.map((order: Order) => [order.id, order])).values()) as Order[];
+
+        const isDeliveredByOrder = (order: Order) => {
+          if (order.status === "FINAL_DELIVERY") {
+            return false;
+          }
+          const trucks = summaryMap[order.id]?.trucks || [];
+          return order.status === "SHIPPING" || trucks.some((truck: any) => truck.status === "DELIVERED");
+        };
+
+        const receivingPendingCount = uniqueOrders.filter((order) => {
+          const trucks = summaryMap[order.id]?.trucks || [];
+          const pendingTruckCount = trucks.filter((truck: any) => truck.status === "DELIVERED" && truck.userReceivingUpdatedAt == null).length;
+          return order.status !== "FINAL_DELIVERY" && (pendingTruckCount > 0 || summaryMap[order.id]?.canFinalizeReceiving);
+        }).length;
+
+        setCounts({
+          pending: uniqueOrders.filter((order) => order.status === "PENDING").length,
+          inProgress: uniqueOrders.filter((order) => ["ACCEPTED", "PICKING", "PACKING", "SORTING"].includes(order.status)).length,
+          delivered: uniqueOrders.filter((order) => isDeliveredByOrder(order)).length,
+          receivingPending: receivingPendingCount,
+          receivingReceived: uniqueOrders.filter((order) => order.status === "FINAL_DELIVERY").length,
+          rejected: uniqueOrders.filter((order) => order.status === "REJECTED").length,
+          total: uniqueOrders.length,
+        });
       } else {
         setTruckSummaryByOrder({});
+        setCounts({ pending: 0, inProgress: 0, delivered: 0, receivingPending: 0, receivingReceived: 0, rejected: 0, total: 0 });
       }
     } catch (err: any) {
       setError(err.message || "Failed to load dashboard data");
@@ -213,7 +234,56 @@ export default function AdminDashboardPage() {
     return () => clearInterval(intervalId);
   }, [token, isAdmin]);
 
-  const currentOrders = useMemo(() => orders[activeTab] || [], [orders, activeTab]);
+  const allOrders = useMemo(() => {
+    const flattened = [
+      ...orders.pending,
+      ...orders.inProgress,
+      ...orders.delivered,
+      ...orders.receivingReceived,
+      ...orders.rejected,
+    ];
+
+    return Array.from(new Map(flattened.map((order) => [order.id, order])).values()) as Order[];
+  }, [orders]);
+
+  function isReceivingReceivedOrder(orderId: string) {
+    const order = allOrders.find((entry) => entry.id === orderId);
+    return order?.status === "FINAL_DELIVERY";
+  }
+
+  function isDeliveredOrder(order: Order) {
+    if (order.status === "FINAL_DELIVERY") {
+      return false;
+    }
+    const summary = truckSummaryByOrder[order.id];
+    const hasDeliveredTruck = (summary?.trucks || []).some((truck) => truck.status === "DELIVERED");
+    return order.status === "SHIPPING" || hasDeliveredTruck;
+  }
+
+  const currentOrders = useMemo(() => {
+    if (activeTab === "pending") {
+      return allOrders.filter((order) => order.status === "PENDING");
+    }
+    if (activeTab === "inProgress") {
+      return allOrders.filter((order) => ["ACCEPTED", "PICKING", "PACKING", "SORTING"].includes(order.status));
+    }
+    if (activeTab === "delivered") {
+      return allOrders.filter((order) => isDeliveredOrder(order));
+    }
+    if (activeTab === "receivingPending") {
+      return allOrders.filter((order) => {
+        const summary = truckSummaryByOrder[order.id];
+        return order.status !== "FINAL_DELIVERY" && (getReceivingPendingTruckCount(order.id) > 0 || summary?.canFinalizeReceiving);
+      });
+    }
+    if (activeTab === "receivingReceived") {
+      return allOrders.filter((order) => order.status === "FINAL_DELIVERY");
+    }
+    if (activeTab === "rejected") {
+      return allOrders.filter((order) => order.status === "REJECTED");
+    }
+    return allOrders;
+  }, [activeTab, allOrders, truckSummaryByOrder]);
 
   const updateStatus = async (orderId: string, status: POStatus) => {
     if (!token) {
@@ -230,6 +300,12 @@ export default function AdminDashboardPage() {
       notify(message, "error");
     }
   };
+
+  function getReceivingPendingTruckCount(orderId: string) {
+    const summary = truckSummaryByOrder[orderId];
+    if (!summary) return 0;
+    return summary.trucks.filter((t) => t.status === "DELIVERED" && t.userReceivingUpdatedAt == null).length;
+  }
 
   const remainingQuantityForOrder = (orderId: string) => {
     const summary = truckSummaryByOrder[orderId];
@@ -416,10 +492,12 @@ export default function AdminDashboardPage() {
           </div>
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-7">
           <div className="rounded-xl bg-white p-5 shadow-sm border border-gray-100"><p className="text-sm text-gray-500">Pending</p><p className="mt-1 text-3xl font-bold text-yellow-600">{counts.pending}</p></div>
           <div className="rounded-xl bg-white p-5 shadow-sm border border-gray-100"><p className="text-sm text-gray-500">In Progress</p><p className="mt-1 text-3xl font-bold text-blue-600">{counts.inProgress}</p></div>
           <div className="rounded-xl bg-white p-5 shadow-sm border border-gray-100"><p className="text-sm text-gray-500">Delivered</p><p className="mt-1 text-3xl font-bold text-green-600">{counts.delivered}</p></div>
+          <div className="rounded-xl bg-white p-5 shadow-sm border border-gray-100"><p className="text-sm text-gray-500">Receiving Pending</p><p className="mt-1 text-3xl font-bold text-orange-600">{counts.receivingPending}</p></div>
+          <div className="rounded-xl bg-white p-5 shadow-sm border border-gray-100"><p className="text-sm text-gray-500">Receiving Received</p><p className="mt-1 text-3xl font-bold text-emerald-600">{counts.receivingReceived}</p></div>
           <div className="rounded-xl bg-white p-5 shadow-sm border border-gray-100"><p className="text-sm text-gray-500">Rejected</p><p className="mt-1 text-3xl font-bold text-red-600">{counts.rejected}</p></div>
           <div className="rounded-xl bg-white p-5 shadow-sm border border-gray-100"><p className="text-sm text-gray-500">Total</p><p className="mt-1 text-3xl font-bold text-gray-700">{counts.total}</p></div>
         </div>
@@ -429,6 +507,12 @@ export default function AdminDashboardPage() {
             <button onClick={() => setActiveTab("pending")} className={`rounded-full px-4 py-1.5 text-sm font-semibold ${activeTab === "pending" ? "bg-yellow-200 text-yellow-900" : "bg-gray-100 text-gray-700"}`}>Pending</button>
             <button onClick={() => setActiveTab("inProgress")} className={`rounded-full px-4 py-1.5 text-sm font-semibold ${activeTab === "inProgress" ? "bg-blue-200 text-blue-900" : "bg-gray-100 text-gray-700"}`}>In Progress</button>
             <button onClick={() => setActiveTab("delivered")} className={`rounded-full px-4 py-1.5 text-sm font-semibold ${activeTab === "delivered" ? "bg-green-200 text-green-900" : "bg-gray-100 text-gray-700"}`}>Delivered</button>
+            <button onClick={() => setActiveTab("receivingPending")} className={`rounded-full px-4 py-1.5 text-sm font-semibold ${activeTab === "receivingPending" ? "bg-orange-200 text-orange-900" : "bg-gray-100 text-gray-700"}`}>
+              Receiving Pending {counts.receivingPending > 0 && <span className="ml-1 inline-block rounded-full bg-orange-500 px-2 py-0.5 text-xs font-bold text-white">{counts.receivingPending}</span>}
+            </button>
+            <button onClick={() => setActiveTab("receivingReceived")} className={`rounded-full px-4 py-1.5 text-sm font-semibold ${activeTab === "receivingReceived" ? "bg-emerald-200 text-emerald-900" : "bg-gray-100 text-gray-700"}`}>
+              Receiving Received
+            </button>
             <button onClick={() => setActiveTab("rejected")} className={`rounded-full px-4 py-1.5 text-sm font-semibold ${activeTab === "rejected" ? "bg-red-200 text-red-900" : "bg-gray-100 text-gray-700"}`}>Rejected</button>
           </div>
 
@@ -542,7 +626,7 @@ export default function AdminDashboardPage() {
                             <p className="text-sm text-gray-600">Loading truck details...</p>
                           ) : (
                             <>
-                              {order.status === "PACKING" && (
+                              {(order.status === "PACKING" || order.status === "SHIPPING") && (
                                 <div className="mb-4 grid gap-3 rounded-lg border border-gray-200 bg-gray-50 p-3 md:grid-cols-2">
                                   <div>
                                     <label className="mb-1 block text-xs font-semibold text-gray-700">Number of trucks</label>
@@ -633,9 +717,27 @@ export default function AdminDashboardPage() {
                                       <div key={truck.id} className="rounded-lg border border-gray-200 p-3">
                                         <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                                           <div>
-                                            <p className="text-sm font-semibold text-gray-900">{truck.truckNumber}</p>
+                                            <div className="flex items-center gap-2">
+                                              <p className="text-sm font-semibold text-gray-900">{truck.truckNumber}</p>
+                                              {truck.status === "DELIVERED" && truck.userReceivingUpdatedAt == null && (
+                                                <span className="rounded-full bg-orange-100 px-2 py-0.5 text-xs font-semibold text-orange-700">Receiving Pending</span>
+                                              )}
+                                            </div>
                                             <p className="text-xs text-gray-600">Status: {TRUCK_STATUS_LABEL[truck.status]}</p>
                                             <p className="text-xs text-gray-600">Material: {truck.materialDescription || "-"}</p>
+                                            {truck.userShortageQuantity != null && (
+                                              <p className="text-xs text-rose-700">
+                                                User reported shortage: {Number(truck.userShortageQuantity).toFixed(3)}
+                                              </p>
+                                            )}
+                                            {truck.userShortageQuantity != null && (
+                                              <p className="text-xs text-emerald-700">
+                                                User received: {Number(truck.effectiveReceivedQuantity || 0).toFixed(3)}
+                                              </p>
+                                            )}
+                                            {truck.userReceivingNote && (
+                                              <p className="text-xs text-gray-600">User note: {truck.userReceivingNote}</p>
+                                            )}
                                           </div>
                                           <div className="flex gap-2">
                                             {nextTruckStatus && (

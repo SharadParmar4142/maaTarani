@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/contexts/AuthContext";
 import { OrderTruckSummary, purchaseOrderAPI, truckTrackingAPI } from "@/lib/api";
+import { PartyPopper, Send } from "lucide-react";
 
 type POStatus =
   | "PENDING"
@@ -73,6 +74,38 @@ export default function UserDashboardPage() {
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [truckSummaryByOrder, setTruckSummaryByOrder] = useState<Record<string, OrderTruckSummary>>({});
   const [showTruckNumbersForOrder, setShowTruckNumbersForOrder] = useState<Record<string, boolean>>({});
+  const [receivingFormByTruck, setReceivingFormByTruck] = useState<Record<string, { shortageQuantity: string; receivingNote: string }>>({});
+  const [statusMessage, setStatusMessage] = useState("");
+  const [celebrationOrderId, setCelebrationOrderId] = useState<string | null>(null);
+  const [activeSection, setActiveSection] = useState<"all" | "needsReceiving" | "rejected">("all");
+  const [finalizingOrderId, setFinalizingOrderId] = useState<string | null>(null);
+
+  const loadOrders = async () => {
+    if (!token || !isAuthenticated || isAdmin) {
+      return;
+    }
+
+    setLoadingOrders(true);
+    setError("");
+    try {
+      const response = await purchaseOrderAPI.getMyOrders(token);
+      const ordersData = response.data || [];
+      setOrders(ordersData);
+      setCounts(response.counts || { pending: 0, inProgress: 0, delivered: 0, rejected: 0, total: 0 });
+
+      const orderIds = ordersData.map((order: Order) => order.id);
+      if (orderIds.length > 0) {
+        const truckResponse = await truckTrackingAPI.getSummariesForOrders(token, orderIds);
+        setTruckSummaryByOrder(truckResponse.data || {});
+      } else {
+        setTruckSummaryByOrder({});
+      }
+    } catch (err: any) {
+      setError(err.message || "Failed to load purchase orders");
+    } finally {
+      setLoadingOrders(false);
+    }
+  };
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
@@ -85,33 +118,6 @@ export default function UserDashboardPage() {
   }, [isLoading, isAuthenticated, isAdmin, router]);
 
   useEffect(() => {
-    if (!token || !isAuthenticated || isAdmin) {
-      return;
-    }
-
-    const loadOrders = async () => {
-      setLoadingOrders(true);
-      setError("");
-      try {
-        const response = await purchaseOrderAPI.getMyOrders(token);
-        const ordersData = response.data || [];
-        setOrders(ordersData);
-        setCounts(response.counts || { pending: 0, inProgress: 0, delivered: 0, rejected: 0, total: 0 });
-
-        const orderIds = ordersData.map((order: Order) => order.id);
-        if (orderIds.length > 0) {
-          const truckResponse = await truckTrackingAPI.getSummariesForOrders(token, orderIds);
-          setTruckSummaryByOrder(truckResponse.data || {});
-        } else {
-          setTruckSummaryByOrder({});
-        }
-      } catch (err: any) {
-        setError(err.message || "Failed to load purchase orders");
-      } finally {
-        setLoadingOrders(false);
-      }
-    };
-
     loadOrders();
   }, [token, isAuthenticated, isAdmin]);
 
@@ -130,6 +136,12 @@ export default function UserDashboardPage() {
 
   const getStepIndex = (status: POStatus) => PO_TRACKING_STEPS.findIndex((step) => step === status);
 
+  function getReceivingPendingTruckCount(orderId: string) {
+    const summary = truckSummaryByOrder[orderId];
+    if (!summary) return 0;
+    return summary.trucks.filter((t) => t.status === "DELIVERED" && t.userReceivingUpdatedAt == null).length;
+  }
+
   const remainingQuantityForOrder = (orderId: string) => {
     const summary = truckSummaryByOrder[orderId];
     if (!summary) {
@@ -140,6 +152,82 @@ export default function UserDashboardPage() {
   };
 
   const truckCountForOrder = (orderId: string) => truckSummaryByOrder[orderId]?.truckCount || 0;
+
+  const filteredOrders = useMemo(() => {
+    if (activeSection === "needsReceiving") {
+      return orders.filter((order) => {
+        const summary = truckSummaryByOrder[order.id];
+        const pendingCount = getReceivingPendingTruckCount(order.id);
+        return order.status !== "FINAL_DELIVERY" && (pendingCount > 0 || summary?.canFinalizeReceiving);
+      });
+    }
+    if (activeSection === "rejected") {
+      return orders.filter((order) => order.status === "REJECTED");
+    }
+    return orders;
+  }, [orders, activeSection, truckSummaryByOrder]);
+
+  const canFinalizeReceiving = (orderId: string) => {
+    const summary = truckSummaryByOrder[orderId];
+    return Boolean(summary?.canFinalizeReceiving);
+  };
+
+  const submitReceivingReport = async (orderId: string, truckId: string) => {
+    if (!token) {
+      return;
+    }
+
+    const formData = receivingFormByTruck[truckId] || { shortageQuantity: "", receivingNote: "" };
+
+    const shortageQuantity = Number(formData.shortageQuantity || 0);
+
+    if (!Number.isFinite(shortageQuantity) || shortageQuantity < 0) {
+      setError("Shortage quantity must be 0 or more");
+      return;
+    }
+
+    try {
+      const response = await truckTrackingAPI.submitReceivingReport(
+        token,
+        orderId,
+        truckId,
+        shortageQuantity,
+        formData.receivingNote || ""
+      );
+
+      setTruckSummaryByOrder((prev) => ({ ...prev, [orderId]: response.data }));
+      setStatusMessage(response.message || "Receiving report submitted");
+      setError("");
+    } catch (err: any) {
+      setError(err.message || "Failed to submit receiving report");
+    }
+  };
+
+  const finalizeReceiving = async (orderId: string) => {
+    if (!token) {
+      return;
+    }
+
+    if (!canFinalizeReceiving(orderId)) {
+      setError("Complete all truck receiving reports and ensure no quantity remains before sending receiving.");
+      return;
+    }
+
+    setFinalizingOrderId(orderId);
+    try {
+      const response = await truckTrackingAPI.finalizeReceivingOrder(token, orderId);
+      setTruckSummaryByOrder((prev) => ({ ...prev, [orderId]: response.data }));
+      setStatusMessage("Order has been completed from both the ends. Receiving closed successfully.");
+      setCelebrationOrderId(orderId);
+      setSelectedOrder((prev) => (prev && prev.id === orderId ? { ...prev, status: "FINAL_DELIVERY" } : prev));
+      setError("");
+      await loadOrders();
+    } catch (err: any) {
+      setError(err.message || "Failed to finalize receiving");
+    } finally {
+      setFinalizingOrderId(null);
+    }
+  };
 
   const cards = useMemo(
     () => [
@@ -185,10 +273,40 @@ export default function UserDashboardPage() {
 
         <div className="rounded-xl bg-white p-6 shadow-sm border border-gray-100">
           <h2 className="text-xl font-semibold text-gray-900">Order Tracking</h2>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button
+              onClick={() => setActiveSection("all")}
+              className={`rounded-full px-4 py-1.5 text-sm font-semibold ${
+                activeSection === "all" ? "bg-gray-900 text-white" : "bg-gray-100 text-gray-700"
+              }`}
+            >
+              All Orders ({orders.length})
+            </button>
+            <button
+              onClick={() => setActiveSection("needsReceiving")}
+              className={`rounded-full px-4 py-1.5 text-sm font-semibold ${
+                activeSection === "needsReceiving" ? "bg-orange-200 text-orange-900" : "bg-gray-100 text-gray-700"
+              }`}
+            >
+              Needs Receiving ({orders.filter((order) => {
+                const summary = truckSummaryByOrder[order.id];
+                return order.status !== "FINAL_DELIVERY" && (getReceivingPendingTruckCount(order.id) > 0 || summary?.canFinalizeReceiving);
+              }).length})
+            </button>
+            <button
+              onClick={() => setActiveSection("rejected")}
+              className={`rounded-full px-4 py-1.5 text-sm font-semibold ${
+                activeSection === "rejected" ? "bg-red-200 text-red-900" : "bg-gray-100 text-gray-700"
+              }`}
+            >
+              Rejected ({orders.filter((order) => order.status === "REJECTED").length})
+            </button>
+          </div>
           {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
+          {statusMessage && <p className="mt-3 text-sm text-emerald-700">{statusMessage}</p>}
           {loadingOrders ? (
             <p className="mt-4 text-gray-500">Loading orders...</p>
-          ) : orders.length === 0 ? (
+          ) : filteredOrders.length === 0 ? (
             <p className="mt-4 text-gray-500">No purchase orders found yet.</p>
           ) : (
             <div className="mt-4 overflow-x-auto">
@@ -207,7 +325,7 @@ export default function UserDashboardPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {orders.map((order) => (
+                  {filteredOrders.map((order) => (
                     <tr key={order.id} className="border-b">
                       <td className="px-3 py-2 font-medium text-gray-900">{order.poNumber}</td>
                       <td className="px-3 py-2">{order.vendorName}</td>
@@ -227,6 +345,11 @@ export default function UserDashboardPage() {
                         >
                           {truckCountForOrder(order.id)} truck(s)
                         </button>
+                            {getReceivingPendingTruckCount(order.id) > 0 && (
+                              <span className="ml-1 inline-block rounded-full bg-orange-100 px-2 py-0.5 text-xs font-semibold text-orange-700">
+                                {getReceivingPendingTruckCount(order.id)} pending
+                              </span>
+                            )}
                       </td>
                       <td className="px-3 py-2">{remainingQuantityForOrder(order.id)}</td>
                       <td className="px-3 py-2">{new Date(order.createdAt).toLocaleDateString()}</td>
@@ -351,16 +474,126 @@ export default function UserDashboardPage() {
                 {!truckSummaryByOrder[selectedOrder.id] || truckSummaryByOrder[selectedOrder.id].truckCount === 0 ? (
                   <p className="text-sm text-gray-600">No trucks assigned yet.</p>
                 ) : (
-                  <ul className="list-disc space-y-1 pl-5 text-sm text-gray-700">
-                    {truckSummaryByOrder[selectedOrder.id].trucks.map((truck) => (
-                      <li key={truck.id}>
-                        {truck.truckNumber} - {truck.materialDescription || "Material not set"} ({truck.status.replace(/_/g, " ")})
-                      </li>
-                    ))}
-                  </ul>
+                  <div className="space-y-3">
+                    {truckSummaryByOrder[selectedOrder.id].trucks.map((truck) => {
+                      const receivingForm = receivingFormByTruck[truck.id] || { shortageQuantity: "", receivingNote: "" };
+
+                      return (
+                        <div key={truck.id} className="rounded-lg border border-gray-200 p-3">
+                          <p className="text-sm font-semibold text-gray-900">{truck.truckNumber}</p>
+                          <p className="text-xs text-gray-600">Material: {truck.materialDescription || "Material not set"}</p>
+                          <p className="text-xs text-gray-600">Status: {truck.status.replace(/_/g, " ")}</p>
+
+                          {truck.userShortageQuantity != null && (
+                            <p className="mt-1 text-xs text-rose-700">Reported shortage: {Number(truck.userShortageQuantity).toFixed(3)}</p>
+                          )}
+                            {truck.status === "DELIVERED" && truck.userReceivingUpdatedAt == null && (
+                              <span className="mt-2 inline-block rounded-full bg-orange-100 px-2 py-0.5 text-xs font-semibold text-orange-700">
+                                Receiving Pending
+                              </span>
+                            )}
+                          {truck.userReceivingNote && (
+                            <p className="text-xs text-gray-600">Receiving note: {truck.userReceivingNote}</p>
+                          )}
+                            {getReceivingPendingTruckCount(selectedOrder.id) > 0 && (
+                              <span className="ml-1 inline-block rounded-full bg-orange-100 px-2 py-0.5 text-xs font-semibold text-orange-700">
+                                {getReceivingPendingTruckCount(selectedOrder.id)} pending
+                              </span>
+                            )}
+
+                          {truck.status === "DELIVERED" && (
+                            <div className="mt-3 rounded-lg border border-blue-200 bg-blue-50 p-3">
+                              <p className="mb-2 text-xs font-semibold text-blue-900">Submit receiving shortage details</p>
+                              <div className="grid gap-2 md:grid-cols-2">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  step="0.001"
+                                  value={receivingForm.shortageQuantity}
+                                  onChange={(e) =>
+                                    setReceivingFormByTruck((prev) => ({
+                                      ...prev,
+                                      [truck.id]: {
+                                        ...receivingForm,
+                                        shortageQuantity: e.target.value,
+                                      },
+                                    }))
+                                  }
+                                  className="rounded border border-gray-300 px-2 py-1 text-xs"
+                                  placeholder="Shortage quantity"
+                                />
+                                <input
+                                  value={receivingForm.receivingNote}
+                                  onChange={(e) =>
+                                    setReceivingFormByTruck((prev) => ({
+                                      ...prev,
+                                      [truck.id]: {
+                                        ...receivingForm,
+                                        receivingNote: e.target.value,
+                                      },
+                                    }))
+                                  }
+                                  className="rounded border border-gray-300 px-2 py-1 text-xs"
+                                  placeholder="Note (optional)"
+                                />
+                              </div>
+                              <button
+                                onClick={() => submitReceivingReport(selectedOrder.id, truck.id)}
+                                className="mt-3 rounded bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
+                              >
+                                Submit Receiving
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 )}
               </div>
             )}
+
+            <div className="mt-5 rounded-xl border border-gray-200 bg-white p-4">
+              {celebrationOrderId === selectedOrder.id && (
+                <div className="mb-4 rounded-xl border border-emerald-200 bg-linear-to-r from-emerald-50 to-teal-50 px-4 py-3 text-emerald-900 shadow-sm">
+                  <div className="flex items-center gap-2 text-sm font-semibold">
+                    <PartyPopper className="h-4 w-4" />
+                    Order has been completed from both the ends.
+                  </div>
+                  <p className="mt-1 text-xs text-emerald-800">Great work. Receiving has been successfully sent and locked for this order.</p>
+                </div>
+              )}
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <h3 className="text-base font-semibold text-gray-900">Send Receiving</h3>
+                  <p className="text-sm text-gray-600">
+                    Finalize only when all delivered trucks have receiving details and no quantity remains.
+                  </p>
+                </div>
+                <button
+                  onClick={() => finalizeReceiving(selectedOrder.id)}
+                  disabled={
+                    selectedOrder.status === "FINAL_DELIVERY" ||
+                    celebrationOrderId === selectedOrder.id ||
+                    !canFinalizeReceiving(selectedOrder.id) ||
+                    finalizingOrderId === selectedOrder.id
+                  }
+                  className="inline-flex items-center gap-2 rounded-lg bg-[#c41e3a] px-4 py-2 text-sm font-semibold text-white hover:bg-[#a01830] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Send className="h-4 w-4" />
+                  {selectedOrder.status === "FINAL_DELIVERY" || celebrationOrderId === selectedOrder.id
+                    ? "Receiving Sent"
+                    : finalizingOrderId === selectedOrder.id
+                      ? "Sending..."
+                      : "Send Receiving"}
+                </button>
+              </div>
+              {selectedOrder.status !== "FINAL_DELIVERY" && celebrationOrderId !== selectedOrder.id && !canFinalizeReceiving(selectedOrder.id) && (
+                <p className="mt-2 text-xs text-gray-500">
+                  This becomes available only after every truck in the order has a receiving report and the remaining quantity is zero.
+                </p>
+              )}
+            </div>
 
             <div className="mt-5 rounded-xl border border-gray-200 p-4">
               <h3 className="mb-2 text-base font-semibold text-gray-900">Remaining Quantity</h3>

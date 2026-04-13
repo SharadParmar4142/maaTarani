@@ -6,6 +6,8 @@ const {
   getPurchaseOrderTruckSummary,
   getTruckSummariesForOrders,
   updateTruckStatus,
+  submitUserReceivingReport,
+  finalizeUserReceivingOrder,
   setTruckDeliveredItems,
 } = require("../controller/truckController");
 
@@ -16,6 +18,8 @@ router.get("/:purchaseOrderId", validateToken, requireRole("ADMIN", "USER"), get
 
 router.post("/:purchaseOrderId/allocate", validateToken, requireRole("ADMIN"), allocateTrucksToPurchaseOrder);
 router.patch("/:purchaseOrderId/:truckId/status", validateToken, requireRole("ADMIN"), updateTruckStatus);
+router.patch("/:purchaseOrderId/:truckId/receiving", validateToken, requireRole("USER"), submitUserReceivingReport);
+router.post("/:purchaseOrderId/receiving/finalize", validateToken, requireRole("USER"), finalizeUserReceivingOrder);
 router.put("/:purchaseOrderId/:truckId/delivered-items", validateToken, requireRole("ADMIN"), setTruckDeliveredItems);
 
 module.exports = router;

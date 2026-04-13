@@ -363,7 +363,8 @@ const getMyPurchaseOrders = asyncHandler(async (req, res) => {
       pending: orders.filter((order) => order.status === PO_STATUSES.PENDING).length,
       accepted: orders.filter((order) => order.status === PO_STATUSES.ACCEPTED).length,
       inProgress: orders.filter((order) => IN_PROGRESS_STATUSES.includes(order.status)).length,
-      delivered: orders.filter((order) => order.status === PO_STATUSES.FINAL_DELIVERY).length,
+      delivered: orders.filter((order) => [PO_STATUSES.SHIPPING, PO_STATUSES.FINAL_DELIVERY].includes(order.status)).length,
+      receivingReceived: orders.filter((order) => order.status === PO_STATUSES.FINAL_DELIVERY).length,
       rejected: orders.filter((order) => order.status === PO_STATUSES.REJECTED).length,
       total: orders.length,
     },
@@ -399,7 +400,8 @@ const getAdminDashboardOrders = asyncHandler(async (req, res) => {
   const pending = orders.filter((order) => order.status === PO_STATUSES.PENDING);
   const accepted = orders.filter((order) => order.status === PO_STATUSES.ACCEPTED);
   const inProgress = orders.filter((order) => IN_PROGRESS_STATUSES.includes(order.status));
-  const delivered = orders.filter((order) => order.status === PO_STATUSES.FINAL_DELIVERY);
+  const delivered = orders.filter((order) => order.status === PO_STATUSES.SHIPPING);
+  const receivingReceived = orders.filter((order) => order.status === PO_STATUSES.FINAL_DELIVERY);
   const rejected = orders.filter((order) => order.status === PO_STATUSES.REJECTED);
 
   res.status(200).json({
@@ -409,6 +411,7 @@ const getAdminDashboardOrders = asyncHandler(async (req, res) => {
       accepted: accepted.length,
       inProgress: inProgress.length,
       delivered: delivered.length,
+      receivingReceived: receivingReceived.length,
       rejected: rejected.length,
       total: orders.length,
     },
@@ -417,6 +420,7 @@ const getAdminDashboardOrders = asyncHandler(async (req, res) => {
       accepted,
       inProgress,
       delivered,
+      receivingReceived,
       rejected,
     },
   });
@@ -448,6 +452,11 @@ const updatePurchaseOrderStatus = asyncHandler(async (req, res) => {
         allowedNextStatuses.length > 0 ? allowedNextStatuses.join(", ") : "none"
       }`
     );
+  }
+
+  if (status === PO_STATUSES.FINAL_DELIVERY) {
+    res.status(400);
+    throw new Error("Admin cannot move order to Receiving Received directly. Use user receiving finalize flow.");
   }
 
   // PO cannot move past UnderLoading unless truck allocation/progress prerequisites are met.

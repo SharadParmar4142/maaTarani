@@ -101,6 +101,10 @@ model TruckAllocation {
   lineItem          LineItem            @relation(fields: [lineItemId], references: [id], onDelete: Cascade)
   truckNumber       String
   status            String              @default("UNDER_LOADING")
+  userShortageQuantity Float?
+  userReceivingNote String?
+  userReceivingUpdatedAt DateTime?
+  userReceivingUpdatedById String?      @db.ObjectId
   deliveredItems    TruckDeliveredItem[]
   createdAt         DateTime            @default(now())
   updatedAt         DateTime            @updatedAt

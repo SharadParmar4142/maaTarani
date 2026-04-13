@@ -56,6 +56,11 @@ export interface TruckSummary {
   materialLineItemId: string;
   materialDescription: string;
   nextStatus: TruckStatus | null;
+  userShortageQuantity: number | null;
+  userReceivingNote: string | null;
+  userReceivingUpdatedAt: string | null;
+  userReceivingUpdatedById: string | null;
+  effectiveReceivedQuantity: number;
   deliveredItems: TruckDeliveredItemSummary[];
   createdAt: string;
   updatedAt: string;
@@ -74,6 +79,9 @@ export interface OrderTruckSummary {
   purchaseOrderStatus: POStatus;
   canAllocateTrucks: boolean;
   truckCount: number;
+  receivingPendingTruckCount: number;
+  receivingCompletedTruckCount: number;
+  canFinalizeReceiving: boolean;
   trucks: TruckSummary[];
   remainingByItem: RemainingByItemSummary[];
   remainingTotalQuantity: number;
@@ -275,6 +283,34 @@ export const truckTrackingAPI = {
         Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({ status }),
+    });
+  },
+
+  submitReceivingReport: async (
+    token: string,
+    purchaseOrderId: string,
+    truckId: string,
+    shortageQuantity: number,
+    receivingNote: string
+  ): Promise<{ success: boolean; data: OrderTruckSummary; message: string }> => {
+    return apiCall(`/api/trucks/${purchaseOrderId}/${truckId}/receiving`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ shortageQuantity, receivingNote }),
+    });
+  },
+
+  finalizeReceivingOrder: async (
+    token: string,
+    purchaseOrderId: string
+  ): Promise<{ success: boolean; data: OrderTruckSummary; message: string }> => {
+    return apiCall(`/api/trucks/${purchaseOrderId}/receiving/finalize`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
     });
   },
 

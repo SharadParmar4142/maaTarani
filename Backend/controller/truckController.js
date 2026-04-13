@@ -2,11 +2,13 @@ const asyncHandler = require("express-async-handler");
 const { prisma, cleanupLegacyTruckData } = require("../config/dbConfig");
 const {
   PO_STATUS_FOR_TRUCK_ALLOCATION,
+  PO_STATUSES_FOR_TRUCK_ALLOCATION,
   TRUCK_STATUSES,
   TRUCK_NUMBER_REGEX,
   canTransitionTruckStatus,
   getNextTruckStatus,
 } = require("../utils/truckTrackingConstants");
+const { PO_STATUSES } = require("../utils/poStatusTransitions");
 
 function normalizeTruckNumber(value) {
   return String(value || "")
@@ -62,12 +64,24 @@ function buildSummary(purchaseOrder, trucks) {
   });
 
   const remainingTotalQuantity = remainingByItem.reduce((sum, item) => sum + item.remainingQuantity, 0);
+  const receivingPendingTruckCount = trucks.filter(
+    (truck) => truck.status === TRUCK_STATUSES.DELIVERED && truck.userReceivingUpdatedAt == null
+  ).length;
+  const receivingCompletedTruckCount = trucks.filter((truck) => truck.userReceivingUpdatedAt != null).length;
+  const canFinalizeReceiving =
+    trucks.length > 0 &&
+    receivingPendingTruckCount === 0 &&
+    receivingCompletedTruckCount === trucks.length &&
+    remainingTotalQuantity === 0;
 
   return {
     purchaseOrderId: purchaseOrder.id,
     purchaseOrderStatus: purchaseOrder.status,
-    canAllocateTrucks: purchaseOrder.status === PO_STATUS_FOR_TRUCK_ALLOCATION,
+    canAllocateTrucks: PO_STATUSES_FOR_TRUCK_ALLOCATION.includes(purchaseOrder.status),
     truckCount: trucks.length,
+    receivingPendingTruckCount,
+    receivingCompletedTruckCount,
+    canFinalizeReceiving,
     trucks: trucks.map((truck) => ({
       id: truck.id,
       truckNumber: truck.truckNumber,
@@ -75,6 +89,13 @@ function buildSummary(purchaseOrder, trucks) {
       materialLineItemId: truck.lineItemId,
       materialDescription: lineItemById.get(truck.lineItemId)?.description || "",
       nextStatus: getNextTruckStatus(truck.status),
+      userShortageQuantity: truck.userShortageQuantity ?? null,
+      userReceivingNote: truck.userReceivingNote ?? null,
+      userReceivingUpdatedAt: truck.userReceivingUpdatedAt ?? null,
+      userReceivingUpdatedById: truck.userReceivingUpdatedById ?? null,
+      effectiveReceivedQuantity:
+        (truck.deliveredItems || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0) -
+        Number(truck.userShortageQuantity || 0),
       deliveredItems: (truck.deliveredItems || []).map((item) => ({
         lineItemId: item.lineItemId,
         description: item.lineItem?.description || lineItemById.get(item.lineItemId)?.description || "",
@@ -204,9 +225,11 @@ const allocateTrucksToPurchaseOrder = asyncHandler(async (req, res) => {
     throw new Error(access.message);
   }
 
-  if (purchaseOrder.status !== PO_STATUS_FOR_TRUCK_ALLOCATION) {
+  if (!PO_STATUSES_FOR_TRUCK_ALLOCATION.includes(purchaseOrder.status)) {
     res.status(400);
-    throw new Error(`Trucks can be allocated only when PO is in ${PO_STATUS_FOR_TRUCK_ALLOCATION} (UnderLoading) stage`);
+    throw new Error(
+      `Trucks can be allocated only when PO is in ${PO_STATUS_FOR_TRUCK_ALLOCATION} (UnderLoading) or SHIPPING (Delivered) stage`
+    );
   }
 
   const existingTruckSet = new Set((purchaseOrder.trucks || []).map((truck) => truck.truckNumber));
@@ -301,6 +324,11 @@ const updateTruckStatus = asyncHandler(async (req, res) => {
     throw new Error("Invalid truck status. Allowed: UNDER_LOADING, DISPATCHED, DELIVERED, RECEIVING");
   }
 
+  if (status === TRUCK_STATUSES.RECEIVING) {
+    res.status(400);
+    throw new Error("Truck can be moved to RECEIVING only by user after submitting shortage form");
+  }
+
   const purchaseOrder = await fetchPurchaseOrderWithTruckContext(purchaseOrderId);
 
   const access = assertPOAccess(purchaseOrder, req.user);
@@ -325,10 +353,23 @@ const updateTruckStatus = asyncHandler(async (req, res) => {
     throw new Error("Delivered item quantities must be specified before moving truck to RECEIVING");
   }
 
-  await prisma.truckAllocation.update({
-    where: { id: truckId },
-    data: { status },
-  });
+  const tx = [
+    prisma.truckAllocation.update({
+      where: { id: truckId },
+      data: { status },
+    }),
+  ];
+
+  if (status === TRUCK_STATUSES.DELIVERED) {
+    tx.push(
+      prisma.purchaseOrder.update({
+        where: { id: purchaseOrderId },
+        data: { status: PO_STATUSES.SHIPPING },
+      })
+    );
+  }
+
+  await prisma.$transaction(tx);
 
   const refreshedPO = await fetchPurchaseOrderWithTruckContext(purchaseOrderId);
   const summary = buildSummary(refreshedPO, refreshedPO.trucks || []);
@@ -337,6 +378,109 @@ const updateTruckStatus = asyncHandler(async (req, res) => {
     success: true,
     message: "Truck status updated",
     data: summary,
+  });
+});
+
+const submitUserReceivingReport = asyncHandler(async (req, res) => {
+  const { purchaseOrderId, truckId } = req.params;
+  const { shortageQuantity, receivingNote } = req.body;
+
+  const normalizedShortage = Number(shortageQuantity || 0);
+  if (!Number.isFinite(normalizedShortage) || normalizedShortage < 0) {
+    res.status(400);
+    throw new Error("shortageQuantity is required and must be >= 0");
+  }
+
+  const purchaseOrder = await fetchPurchaseOrderWithTruckContext(purchaseOrderId);
+  const access = assertPOAccess(purchaseOrder, req.user);
+  if (!access.ok) {
+    res.status(access.code);
+    throw new Error(access.message);
+  }
+
+  const truck = (purchaseOrder.trucks || []).find((item) => item.id === truckId);
+  if (!truck) {
+    res.status(404);
+    throw new Error("Truck allocation not found");
+  }
+
+  if (truck.status !== TRUCK_STATUSES.DELIVERED) {
+    res.status(400);
+    throw new Error("Receiving form can be submitted only when truck status is DELIVERED");
+  }
+
+  const deliveredQuantity = (truck.deliveredItems || []).reduce(
+    (sum, item) => sum + Number(item.quantity || 0),
+    0
+  );
+
+  if (deliveredQuantity <= 0) {
+    res.status(400);
+    throw new Error("Delivered quantity is not available for this truck");
+  }
+
+  if (normalizedShortage > deliveredQuantity) {
+    res.status(400);
+    throw new Error(`shortageQuantity cannot exceed delivered quantity (${deliveredQuantity})`);
+  }
+
+  await prisma.$transaction([
+    prisma.truckAllocation.update({
+      where: { id: truckId },
+      data: {
+        status: TRUCK_STATUSES.RECEIVING,
+        userShortageQuantity: normalizedShortage,
+        userReceivingNote:
+          typeof receivingNote === "string" ? receivingNote.trim() || null : truck.userReceivingNote || null,
+        userReceivingUpdatedAt: new Date(),
+        userReceivingUpdatedById: req.user.id,
+      },
+    }),
+  ]);
+
+  const refreshedPO = await fetchPurchaseOrderWithTruckContext(purchaseOrderId);
+  const summary = buildSummary(refreshedPO, refreshedPO.trucks || []);
+
+  res.status(200).json({
+    success: true,
+    message: "Receiving details submitted successfully",
+    data: summary,
+  });
+});
+
+const finalizeUserReceivingOrder = asyncHandler(async (req, res) => {
+  const { purchaseOrderId } = req.params;
+
+  const purchaseOrder = await fetchPurchaseOrderWithTruckContext(purchaseOrderId);
+  const access = assertPOAccess(purchaseOrder, req.user);
+  if (!access.ok) {
+    res.status(access.code);
+    throw new Error(access.message);
+  }
+
+  const summary = buildSummary(purchaseOrder, purchaseOrder.trucks || []);
+
+  if (!summary.canFinalizeReceiving) {
+    res.status(400);
+    throw new Error(
+      "Receiving can be finalized only when every truck has submitted receiving details and no quantity remains"
+    );
+  }
+
+  await prisma.purchaseOrder.update({
+    where: { id: purchaseOrderId },
+    data: {
+      status: PO_STATUSES.FINAL_DELIVERY,
+    },
+  });
+
+  const refreshedPO = await fetchPurchaseOrderWithTruckContext(purchaseOrderId);
+  const refreshedSummary = buildSummary(refreshedPO, refreshedPO.trucks || []);
+
+  res.status(200).json({
+    success: true,
+    message: "Receiving finalized successfully",
+    data: refreshedSummary,
   });
 });
 
@@ -428,5 +572,7 @@ module.exports = {
   getPurchaseOrderTruckSummary,
   getTruckSummariesForOrders,
   updateTruckStatus,
+  submitUserReceivingReport,
+  finalizeUserReceivingOrder,
   setTruckDeliveredItems,
 };
