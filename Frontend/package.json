@@ -3,10 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "next build",
-    "dev": "next dev",
-    "lint": "eslint .",
-    "start": "next start"
+    "build": "npm --prefix react-app run build",
+    "dev": "npm --prefix react-app run dev",
+    "lint": "npm --prefix react-app run lint",
+    "start": "npm --prefix react-app run preview"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
@@ -37,7 +37,7 @@
     "@radix-ui/react-toggle": "1.1.1",
     "@radix-ui/react-toggle-group": "1.1.1",
     "@radix-ui/react-tooltip": "1.1.6",
-    "@vercel/analytics": "latest",
+    
     "autoprefixer": "^10.4.20",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -48,8 +48,6 @@
     "jspdf": "^4.2.0",
     "jspdf-autotable": "^5.0.7",
     "lucide-react": "^0.454.0",
-    "next": "16.0.3",
-    "next-themes": "^0.4.6",
     "react": "19.2.0",
     "react-day-picker": "9.8.0",
     "react-dom": "19.2.0",

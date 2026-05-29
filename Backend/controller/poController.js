@@ -1,6 +1,7 @@
 const asyncHandler = require("express-async-handler");
 const { prisma } = require("../config/dbConfig");
 const { google } = require("googleapis");
+const crypto = require("crypto");
 const {
   PO_STATUSES,
   IN_PROGRESS_STATUSES,
@@ -107,6 +108,19 @@ function deepEqual(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+const PO_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789!@#$%^&*_-+=";
+
+function generatePurchaseOrderCode(length = 15) {
+  const bytes = crypto.randomBytes(length);
+  let code = "";
+
+  for (let index = 0; index < length; index += 1) {
+    code += PO_CODE_ALPHABET[bytes[index] % PO_CODE_ALPHABET.length];
+  }
+
+  return code;
+}
+
 const createPurchaseOrder = asyncHandler(async (req, res) => {
   try {
     if (!req.user?.id) {
@@ -151,64 +165,80 @@ const createPurchaseOrder = asyncHandler(async (req, res) => {
       }
     }
 
-    // Generate a unique reference ID for database management (numbers only)
-    const uniqueId = `${Date.now()}${Math.floor(Math.random() * 1000000)}`;
-
     const normalizedOrderDate = orderInfo.orderDate ? new Date(orderInfo.orderDate) : null;
     const normalizedDeliveryDate = orderInfo.deliveryDate ? new Date(orderInfo.deliveryDate) : null;
 
-    const purchaseOrder = await prisma.purchaseOrder.create({
-      data: {
-        uniqueId: uniqueId,
-        userId: req.user.id,
-        status: PO_STATUSES.PENDING,
-        companyName: company.name,
-        companyAddress: company.address,
-        companyCityStateZip: company.cityStateZip,
-        companyCountry: company.country,
-        companyContact: company.contact || null,
+    let purchaseOrder = null;
+    let uniqueId = "";
 
-        vendorName: vendor.name,
-        vendorAddress: vendor.address,
-        vendorCityStateZip: vendor.cityStateZip,
-        vendorCountry: vendor.country,
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      uniqueId = generatePurchaseOrderCode();
 
-        poNumber: orderInfo.poNumber,
-        orderDate: normalizedOrderDate,
-        deliveryDate: normalizedDeliveryDate,
+      try {
+        purchaseOrder = await prisma.purchaseOrder.create({
+          data: {
+            uniqueId,
+            userId: req.user.id,
+            status: PO_STATUSES.PENDING,
+            companyName: company.name,
+            companyAddress: company.address,
+            companyCityStateZip: company.cityStateZip,
+            companyCountry: company.country,
+            companyContact: company.contact || null,
 
-        subTotal: subTotal,
-        taxRate: taxRate,
-        taxAmount: taxAmount,
-        total: total,
+            vendorName: vendor.name,
+            vendorAddress: vendor.address,
+            vendorCityStateZip: vendor.cityStateZip,
+            vendorCountry: vendor.country,
 
-        lineItems: {
-          create: lineItems.map((item) => {
-            const qty = Number(item.quantity) || 0;
-            const rate = Number(item.rate) || 0;
-            const gst = Number(item.gst) || 0;
-            const amount = item.amount != null ? item.amount : qty * rate * (1 + gst / 100);
-            return {
-              description: item.description,
-              quantity: qty,
-              rate: rate,
-              amount: amount,
-              gst: gst,
-            };
-          }),
-        },
-      },
-      include: {
-        lineItems: true,
-        user: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
+            poNumber: orderInfo.poNumber,
+            orderDate: normalizedOrderDate,
+            deliveryDate: normalizedDeliveryDate,
+
+            subTotal: subTotal,
+            taxRate: taxRate,
+            taxAmount: taxAmount,
+            total: total,
+
+            lineItems: {
+              create: lineItems.map((item) => {
+                const qty = Number(item.quantity) || 0;
+                const rate = Number(item.rate) || 0;
+                const gst = Number(item.gst) || 0;
+                const amount = item.amount != null ? item.amount : qty * rate * (1 + gst / 100);
+                return {
+                  description: item.description,
+                  quantity: qty,
+                  rate: rate,
+                  amount: amount,
+                  gst: gst,
+                };
+              }),
+            },
           },
-        },
-      },
-    });
+          include: {
+            lineItems: true,
+            user: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+              },
+            },
+          },
+        });
+        break;
+      } catch (error) {
+        if (error?.code === "P2002" && attempt < 4) {
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    if (!purchaseOrder) {
+      throw new Error("Unable to generate a unique purchase order code");
+    }
 
     res.status(201).json({ 
       success: true, 
@@ -251,8 +281,8 @@ const updateGoogleSheet = asyncHandler(async (req, res) => {
       throw new Error("GOOGLE_SHEET_ID environment variable is not set");
     }
 
-    // Generate unique_id if not provided (numbers only)
-    const finalUniqueId = uniqueId || `${Date.now()}${Math.floor(Math.random() * 1000000)}`;
+    // Reuse the same code shape as purchase-order creation so sheet exports and the app match.
+    const finalUniqueId = uniqueId || generatePurchaseOrderCode();
 
     const rows = lineItems.map((item) => [
       company.name,                    // A: Company Name
@@ -346,6 +376,9 @@ const getMyPurchaseOrders = asyncHandler(async (req, res) => {
     where: { userId: req.user.id },
     include: {
       lineItems: true,
+      selectedCompany: {
+        select: { id: true, companyName: true, companySize: true, companyLocation: true, companyPhone: true },
+      },
       reviewedBy: {
         select: {
           id: true,
@@ -439,6 +472,21 @@ const updatePurchaseOrderStatus = asyncHandler(async (req, res) => {
   if (!existingOrder) {
     res.status(404);
     throw new Error("Purchase order not found");
+  }
+
+  // If the requester is a company, ensure they are the selected company for this PO
+  const normalizedRole = String(req.user?.role || "").toLowerCase();
+  if (normalizedRole === "company") {
+    const company = await prisma.company.findUnique({ where: { userId: req.user.id } });
+    if (!company) {
+      res.status(404);
+      throw new Error("Company profile not found");
+    }
+
+    if (!existingOrder.selectedCompanyId || String(existingOrder.selectedCompanyId) !== String(company.id)) {
+      res.status(403);
+      throw new Error("You are not the selected company for this purchase order");
+    }
   }
 
   const allowedNextStatuses = getAllowedNextStatuses(existingOrder.status);

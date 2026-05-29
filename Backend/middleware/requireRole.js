@@ -4,7 +4,10 @@ const requireRole = (...allowedRoles) => (req, res, next) => {
     throw new Error("User is not authorized");
   }
 
-  if (!allowedRoles.includes(req.user.role)) {
+  const normalizedUserRole = String(req.user.role).toLowerCase();
+  const normalizedAllowedRoles = allowedRoles.map((role) => String(role).toLowerCase());
+
+  if (!normalizedAllowedRoles.includes(normalizedUserRole)) {
     res.status(403);
     throw new Error("Access denied");
   }

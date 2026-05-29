@@ -17,12 +17,26 @@ function normalizeTruckNumber(value) {
     .replace(/\s+/g, "");
 }
 
-function assertPOAccess(purchaseOrder, user) {
+async function assertPOAccess(purchaseOrder, user) {
   if (!purchaseOrder) {
     return { ok: false, code: 404, message: "Purchase order not found" };
   }
 
   if (user.role === "ADMIN") {
+    return { ok: true };
+  }
+
+  if (String(user.role || "").toLowerCase() === "company") {
+    const company = await prisma.company.findUnique({ where: { userId: user.id } });
+
+    if (!company) {
+      return { ok: false, code: 404, message: "Company profile not found" };
+    }
+
+    if (String(purchaseOrder.selectedCompanyId || "") !== String(company.id)) {
+      return { ok: false, code: 403, message: "Access denied" };
+    }
+
     return { ok: true };
   }
 
@@ -219,7 +233,7 @@ const allocateTrucksToPurchaseOrder = asyncHandler(async (req, res) => {
     },
   });
 
-  const access = assertPOAccess(purchaseOrder, req.user);
+  const access = await assertPOAccess(purchaseOrder, req.user);
   if (!access.ok) {
     res.status(access.code);
     throw new Error(access.message);
@@ -276,7 +290,8 @@ const getPurchaseOrderTruckSummary = asyncHandler(async (req, res) => {
 
   const purchaseOrder = await fetchPurchaseOrderWithTruckContext(purchaseOrderId);
 
-  const access = assertPOAccess(purchaseOrder, req.user);
+  const access = await assertPOAccess(purchaseOrder, req.user);
+  
   if (!access.ok) {
     res.status(access.code);
     throw new Error(access.message);
@@ -299,9 +314,20 @@ const getTruckSummariesForOrders = asyncHandler(async (req, res) => {
 
   const uniqueOrderIds = [...new Set(orderIds.map((id) => String(id).trim()).filter(Boolean))];
 
+  let companyId = null;
+  if (String(req.user.role || "").toLowerCase() === "company") {
+    const company = await prisma.company.findUnique({ where: { userId: req.user.id } });
+    if (!company) {
+      res.status(404);
+      throw new Error("Company profile not found");
+    }
+    companyId = company.id;
+  }
+
   const purchaseOrders = await queryPurchaseOrdersWithTruckSummary({
     id: { in: uniqueOrderIds },
     ...(req.user.role === "USER" ? { userId: req.user.id } : {}),
+    ...(companyId ? { selectedCompanyId: companyId } : {}),
   });
 
   const summaryByOrderId = {};
@@ -331,7 +357,7 @@ const updateTruckStatus = asyncHandler(async (req, res) => {
 
   const purchaseOrder = await fetchPurchaseOrderWithTruckContext(purchaseOrderId);
 
-  const access = assertPOAccess(purchaseOrder, req.user);
+  const access = await assertPOAccess(purchaseOrder, req.user);
   if (!access.ok) {
     res.status(access.code);
     throw new Error(access.message);
@@ -392,7 +418,7 @@ const submitUserReceivingReport = asyncHandler(async (req, res) => {
   }
 
   const purchaseOrder = await fetchPurchaseOrderWithTruckContext(purchaseOrderId);
-  const access = assertPOAccess(purchaseOrder, req.user);
+  const access = await assertPOAccess(purchaseOrder, req.user);
   if (!access.ok) {
     res.status(access.code);
     throw new Error(access.message);
@@ -452,7 +478,7 @@ const finalizeUserReceivingOrder = asyncHandler(async (req, res) => {
   const { purchaseOrderId } = req.params;
 
   const purchaseOrder = await fetchPurchaseOrderWithTruckContext(purchaseOrderId);
-  const access = assertPOAccess(purchaseOrder, req.user);
+  const access = await assertPOAccess(purchaseOrder, req.user);
   if (!access.ok) {
     res.status(access.code);
     throw new Error(access.message);
@@ -496,7 +522,7 @@ const setTruckDeliveredItems = asyncHandler(async (req, res) => {
 
   const purchaseOrder = await fetchPurchaseOrderWithTruckContext(purchaseOrderId);
 
-  const access = assertPOAccess(purchaseOrder, req.user);
+  const access = await assertPOAccess(purchaseOrder, req.user);
   if (!access.ok) {
     res.status(access.code);
     throw new Error(access.message);

@@ -1,23 +1,17 @@
-// API Configuration
-// Support both Next (`NEXT_PUBLIC_API_URL`) and Vite (`VITE_API_URL`) envs.
-const API_BASE_URL = (typeof import !== 'undefined' && typeof (import.meta as any) !== 'undefined' && (import.meta as any).env?.VITE_API_URL)
-  || process.env.NEXT_PUBLIC_API_URL
-  || 'http://localhost:5000';
+// Copied API helper for React (Vite) app
+// Support both Vite (`VITE_API_URL`) and Next (`NEXT_PUBLIC_API_URL`) envs.
+const viteEnv = (import.meta as ImportMeta & { env?: Record<string, string> }).env;
+const API_BASE_URL =
+  viteEnv?.VITE_API_URL ||
+  (typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_API_URL : undefined) ||
+  'http://localhost:5000';
 
 export interface AuthUser {
   id: string;
   name: string;
   email: string;
   phone: string;
-  role: 'USER' | 'ADMIN' | 'COMPANY' | 'company';
-}
-
-export interface CompanyMaterialOffer {
-  id: string;
-  materialName: string;
-  estimatedPrice: number;
-  deliverySpeedDays: number;
-  serviceArea?: string | null;
+  role: 'USER' | 'ADMIN' | 'company';
 }
 
 export interface Company {
@@ -26,13 +20,9 @@ export interface Company {
   companySize: string;
   yearOfEstablishment: number;
   gstNumber: string;
-  panNumber?: string | null;
   companyPhone?: string | null;
   companyLocation?: string | null;
-  deliverySpeedDays?: number | null;
   serviceArea?: string | null;
-  about?: string | null;
-  materialOffers?: CompanyMaterialOffer[];
 }
 
 export interface AuthResponse {
@@ -146,7 +136,6 @@ async function apiCall(endpoint: string, options: RequestInit = {}) {
   }
 }
 
-// Auth API Functions
 export const authAPI = {
   register: async (userData: {
     name: string;
@@ -194,12 +183,6 @@ export const authAPI = {
     deliverySpeedDays?: number;
     serviceArea?: string;
     about?: string;
-    offerings: Array<{
-      materialName: string;
-      estimatedPrice: number;
-      deliverySpeedDays: number;
-      serviceArea?: string;
-    }>;
   }): Promise<AuthResponse> => {
     return apiCall('/api/company/register', {
       method: 'POST',
@@ -393,6 +376,15 @@ export const truckTrackingAPI = {
 
 export const companyAPI = {
   getDashboard: async (token: string): Promise<CompanyDashboardResponse> => {
+    return apiCall('/api/company/dashboard', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+  },
+
+  getOpenPurchaseOrders: async (token: string): Promise<CompanyDashboardResponse> => {
     return apiCall('/api/company/dashboard', {
       method: 'GET',
       headers: {

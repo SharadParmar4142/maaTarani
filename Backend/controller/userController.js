@@ -44,6 +44,11 @@ const toPublicCompany = (company) => {
         gstNumber: company.gstNumber,
         panNumber: company.panNumber,
         companyPhone: company.companyPhone,
+        companyLocation: company.companyLocation,
+        deliverySpeedDays: company.deliverySpeedDays,
+        serviceArea: company.serviceArea,
+        about: company.about,
+        materialOffers: company.materialOffers || [],
     };
 };
 
@@ -153,7 +158,7 @@ const registerUser = asyncHandler(async (req, res) => {
             data: {
                 name,
                 phone,
-                email,
+                email: String(email).trim().toLowerCase(),
                 password: hashedPassword,
                 role: "USER",
             }
@@ -206,9 +211,13 @@ const loginUser = asyncHandler(async (req, res) => {
         throw new Error("All fields are mandatory");
     }
 
+    // Normalize email to lowercase so login works for all user types
+    // (company register stores email lowercased; this keeps it consistent)
+    const normalizedEmail = String(email).trim().toLowerCase();
+
     const user = await prisma.user.findUnique({
-        where: { email },
-        include: { company: true }
+        where: { email: normalizedEmail },
+        include: { company: true },
     });
 
     if (!user) {

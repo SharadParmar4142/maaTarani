@@ -36,10 +36,30 @@ model Company {
   gstNumber             String    @unique
   panNumber             String?
   companyPhone          String?
+  companyLocation       String?
+  deliverySpeedDays     Int?
+  serviceArea           String?
+  about                 String?
+  materialOffers        CompanyMaterialOffer[]
+  selectedPurchaseOrders PurchaseOrder[] @relation("PurchaseOrderSelectedCompany")
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
 
   @@map("companies")
+}
+
+model CompanyMaterialOffer {
+  id                String    @id @default(auto()) @map("_id") @db.ObjectId
+  companyId         String    @db.ObjectId
+  company           Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  materialName      String
+  estimatedPrice    Float
+  deliverySpeedDays Int
+  serviceArea       String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@map("company_material_offers")
 }
 
 model PurchaseOrder {
@@ -52,6 +72,8 @@ model PurchaseOrder {
   reviewedAt            DateTime?
   reviewedById          String?     @db.ObjectId
   reviewedBy            User?       @relation("AdminReviewedOrders", fields: [reviewedById], references: [id], onDelete: SetNull)
+  selectedCompanyId     String?     @db.ObjectId
+  selectedCompany       Company?    @relation("PurchaseOrderSelectedCompany", fields: [selectedCompanyId], references: [id], onDelete: SetNull)
   companyName           String
   companyAddress        String
   companyCityStateZip   String

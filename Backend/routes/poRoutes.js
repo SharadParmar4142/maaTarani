@@ -18,6 +18,7 @@ router.post("/checkDuplicate", validateToken, requireRole("USER"), checkDuplicat
 router.get("/my", validateToken, requireRole("USER"), getMyPurchaseOrders);
 
 router.get("/admin/dashboard", validateToken, requireRole("ADMIN"), getAdminDashboardOrders);
-router.patch("/:id/status", validateToken, requireRole("ADMIN"), updatePurchaseOrderStatus);
+// Allow ADMIN or the selected company to update purchase order status
+router.patch("/:id/status", validateToken, requireRole("ADMIN", "company"), updatePurchaseOrderStatus);
 
 module.exports = router;

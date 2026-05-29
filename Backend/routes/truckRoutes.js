@@ -13,13 +13,13 @@ const {
 
 const router = express.Router();
 
-router.post("/summaries", validateToken, requireRole("ADMIN", "USER"), getTruckSummariesForOrders);
-router.get("/:purchaseOrderId", validateToken, requireRole("ADMIN", "USER"), getPurchaseOrderTruckSummary);
+router.post("/summaries", validateToken, requireRole("ADMIN", "USER", "company"), getTruckSummariesForOrders);
+router.get("/:purchaseOrderId", validateToken, requireRole("ADMIN", "USER", "company"), getPurchaseOrderTruckSummary);
 
-router.post("/:purchaseOrderId/allocate", validateToken, requireRole("ADMIN"), allocateTrucksToPurchaseOrder);
-router.patch("/:purchaseOrderId/:truckId/status", validateToken, requireRole("ADMIN"), updateTruckStatus);
+router.post("/:purchaseOrderId/allocate", validateToken, requireRole("ADMIN", "company"), allocateTrucksToPurchaseOrder);
+router.patch("/:purchaseOrderId/:truckId/status", validateToken, requireRole("ADMIN", "company"), updateTruckStatus);
 router.patch("/:purchaseOrderId/:truckId/receiving", validateToken, requireRole("USER"), submitUserReceivingReport);
-router.post("/:purchaseOrderId/receiving/finalize", validateToken, requireRole("USER"), finalizeUserReceivingOrder);
-router.put("/:purchaseOrderId/:truckId/delivered-items", validateToken, requireRole("ADMIN"), setTruckDeliveredItems);
+router.post("/:purchaseOrderId/receiving/finalize", validateToken, requireRole("ADMIN", "USER", "company"), finalizeUserReceivingOrder);
+router.put("/:purchaseOrderId/:truckId/delivered-items", validateToken, requireRole("ADMIN", "company"), setTruckDeliveredItems);
 
 module.exports = router;
